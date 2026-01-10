@@ -1,0 +1,12 @@
+# ETL Pipeline Dependencies
+# Python 3.12
+
+# Configuration
+python-dotenv>=1.0.0
+
+# Storage (S3-compatible)
+boto3>=1.34.0
+botocore>=1.34.0
+
+# Utilities
+python-dateutil>=2.8.2
