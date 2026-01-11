@@ -23,6 +23,14 @@ This module handles:
 - Python 3.12
 - Akamai Object Storage account with S3-compatible API access
 
+### 🔑 **First Time Setup? Get Your Akamai Credentials**
+
+**👉 See [AKAMAI_SETUP_GUIDE.md](./AKAMAI_SETUP_GUIDE.md) for a complete step-by-step guide on how to:**
+- Create Access Keys and Secret Keys
+- Find your Endpoint URL
+- Get your Bucket Name and Region
+- Configure everything properly
+
 ### Installation
 
 1. Create a virtual environment:
@@ -50,6 +58,7 @@ pip install -r requirements.txt
 cp .env.example .env
 
 # Edit .env with your actual credentials
+# See AKAMAI_SETUP_GUIDE.md for detailed instructions
 ```
 
 ### Environment Variables
