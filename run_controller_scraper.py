@@ -1,24 +1,29 @@
 """Run Controller scraper script.
 
 Scrapes Controller.com aircraft listings and saves raw HTML to local storage.
+Uses undetected-chromedriver for better bot detection evasion with human-like behavior.
 """
 
-from scrapers.controller_scraper import ControllerScraper
+from scrapers.controller_scraper_undetected import ControllerScraperUndetected
 from utils.logger import setup_logging, get_logger
 
 
 def main():
-    """Run Controller scraper."""
+    """Run Controller scraper with human-like behavior."""
     setup_logging()
     logger = get_logger(__name__)
     
     try:
         logger.info("Starting Controller.com aircraft listings scraper...")
+        logger.info("Using undetected-chromedriver with human-like behavior")
+        logger.info("Priority: Bot Detection Bypass > Speed")
         
-        # Initialize scraper with 2 second rate limit
-        scraper = ControllerScraper(rate_limit=2.0)
+        # Initialize scraper with human-like rate limit (6 seconds base, 6-12s actual)
+        # Slower but more human-like to avoid bot detection
+        scraper = ControllerScraperUndetected(rate_limit=6.0, headless=False)
         
-        # Scrape all pages (set max_pages=None for all pages, or a number to limit)
+        # Scrape ALL pages (no limit) - stops automatically when Y = Z (current_end >= total_listings)
+        # Pagination pattern: "X - Y of Z Listings" - stops when Y >= Z
         result = scraper.scrape_listings(max_pages=None)  # Scrape all pages
         
         logger.info("=" * 60)

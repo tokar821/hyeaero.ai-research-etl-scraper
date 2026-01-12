@@ -7,6 +7,7 @@ Saves raw HTML responses and extracts basic listing information.
 
 import hashlib
 import json
+import random
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,12 @@ from urllib.parse import urljoin, urlparse
 
 from playwright.sync_api import sync_playwright, Page, Browser
 from bs4 import BeautifulSoup
+
+try:
+    from playwright_stealth import stealth_sync
+    STEALTH_AVAILABLE = True
+except ImportError:
+    STEALTH_AVAILABLE = False
 
 from utils.logger import get_logger
 
@@ -32,20 +39,34 @@ class ControllerDownloadError(ControllerScraperError):
 
 
 class ControllerScraper:
-    """Scraper for Controller.com aircraft listings using Playwright."""
+    """Scraper for Controller.com aircraft listings using Playwright.
+    
+    Enhanced with strong anti-bot detection measures:
+    - playwright-stealth plugin (if available)
+    - Non-headless mode by default
+    - Human-like mouse movements and scrolling
+    - Realistic browser headers and fingerprinting
+    - Enhanced fingerprinting protection (Canvas, WebGL, etc.)
+    - Direct URL access (no homepage visit - no login needed)
+    - Randomized rate limiting
+    
+    Note: If Playwright continues to be detected, consider using
+    undetected-chromedriver (Selenium-based) as an alternative.
+    """
     
     BASE_URL = "https://www.controller.com"
     START_URL = "/listings/search?page=1"
     
-    # Rate limiting: seconds to wait between requests
-    RATE_LIMIT_DELAY = 2.0  # 2 seconds between requests
+    # Rate limiting: seconds to wait between requests (with randomization)
+    RATE_LIMIT_DELAY = 3.0  # 3 seconds base delay between requests (will be randomized 2.4-4.5s)
     
-    def __init__(self, storage_base_path: Optional[Path] = None, rate_limit: float = 2.0):
+    def __init__(self, storage_base_path: Optional[Path] = None, rate_limit: float = 2.0, headless: bool = False):
         """Initialize Controller scraper.
         
         Args:
             storage_base_path: Base path for local storage. If None, uses './store'.
             rate_limit: Seconds to wait between requests. Default: 2.0 seconds.
+            headless: Run browser in headless mode. Default: False (non-headless for better bot detection evasion).
         """
         if storage_base_path is None:
             storage_base_path = Path(__file__).parent.parent / "store"
@@ -57,12 +78,13 @@ class ControllerScraper:
         self.raw_controller_path.mkdir(parents=True, exist_ok=True)
         
         self.rate_limit = rate_limit
+        self.headless = headless
         
         # Track visited URLs to avoid duplicates
         self.visited_urls = set()
-        
+    
     def _setup_browser(self, playwright) -> Browser:
-        """Setup and configure Playwright browser.
+        """Setup and configure Playwright browser with anti-bot evasion.
         
         Args:
             playwright: Playwright instance.
@@ -70,13 +92,20 @@ class ControllerScraper:
         Returns:
             Configured browser instance.
         """
-        # Launch browser in headless mode (set to False for debugging)
+        # Launch browser (non-headless by default for better bot detection evasion)
+        # Non-headless mode runs a real browser window which is harder for sites to detect
         browser = playwright.chromium.launch(
-            headless=True,
+            headless=self.headless,
             args=[
                 '--disable-blink-features=AutomationControlled',
                 '--disable-dev-shm-usage',
-                '--no-sandbox',
+                '--window-size=1920,1080',
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process',
+                '--disable-site-isolation-trials',
+                '--disable-infobars',
+                '--disable-notifications',
+                '--disable-popup-blocking',
             ]
         )
         
@@ -91,40 +120,202 @@ class ControllerScraper:
         Returns:
             Configured page instance.
         """
+        # Use persistent context to save cookies/session (helps avoid detection)
+        # This makes the browser behave more like a real user session
         context = browser.new_context(
             viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             locale='en-US',
             timezone_id='America/New_York',
+            permissions=['geolocation'],
+            geolocation={'latitude': 40.7128, 'longitude': -74.0060},  # NYC coordinates
+            color_scheme='light',
+            # Add more realistic browser properties
+            device_scale_factor=1,
+            has_touch=False,
+            is_mobile=False,
+            java_script_enabled=True,
         )
         
-        # Add extra headers
+        # Add extra headers to mimic real browser
         context.set_extra_http_headers({
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
             'Sec-Fetch-Dest': 'document',
             'Sec-Fetch-Mode': 'navigate',
             'Sec-Fetch-Site': 'none',
             'Sec-Fetch-User': '?1',
+            'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Cache-Control': 'max-age=0',
         })
         
         page = context.new_page()
         
-        # Remove webdriver property to avoid detection
+        # Apply playwright-stealth plugin if available
+        if STEALTH_AVAILABLE:
+            try:
+                stealth_sync(page)
+                logger.debug("Applied playwright-stealth plugin")
+            except Exception as e:
+                logger.warning(f"Failed to apply stealth plugin: {e}")
+        
+        # Enhanced comprehensive anti-detection scripts
         page.add_init_script("""
+            // Remove webdriver property completely
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined
             });
+            
+            // Override plugins to match real browser
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => {
+                    const plugins = [];
+                    for (let i = 0; i < 5; i++) {
+                        plugins.push({
+                            name: `Plugin ${i}`,
+                            description: `Plugin ${i} Description`,
+                            filename: `plugin${i}.dll`
+                        });
+                    }
+                    return plugins;
+                }
+            });
+            
+            // Override languages
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en']
+            });
+            
+            // Override permissions
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+            );
+            
+            // Chrome object with more properties
+            window.chrome = {
+                runtime: {},
+                loadTimes: function() {},
+                csi: function() {},
+                app: {}
+            };
+            
+            // Override getBattery
+            if (navigator.getBattery) {
+                navigator.getBattery = () => Promise.resolve({
+                    charging: true,
+                    chargingTime: 0,
+                    dischargingTime: Infinity,
+                    level: 1
+                });
+            }
+            
+            // Override permissions
+            const PermissionStatus = function() {};
+            PermissionStatus.prototype.state = 'granted';
+            window.PermissionStatus = PermissionStatus;
+            
+            // Canvas fingerprint protection - add noise
+            const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+            HTMLCanvasElement.prototype.toDataURL = function() {
+                const context = this.getContext('2d');
+                if (context) {
+                    const imageData = context.getImageData(0, 0, this.width, this.height);
+                    // Add minimal noise to prevent fingerprinting
+                    for (let i = 0; i < imageData.data.length; i += 4) {
+                        if (Math.random() < 0.001) {
+                            imageData.data[i] = Math.min(255, imageData.data[i] + 1);
+                        }
+                    }
+                    context.putImageData(imageData, 0, 0);
+                }
+                return originalToDataURL.apply(this, arguments);
+            };
+            
+            // Override WebGL fingerprinting
+            const getParameter = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                if (parameter === 37445) { // UNMASKED_VENDOR_WEBGL
+                    return 'Intel Inc.';
+                }
+                if (parameter === 37446) { // UNMASKED_RENDERER_WEBGL
+                    return 'Intel Iris OpenGL Engine';
+                }
+                return getParameter.apply(this, arguments);
+            };
+            
+            // Override Notification permission
+            const OriginalNotification = window.Notification;
+            window.Notification = function(title, options) {
+                return new OriginalNotification(title, options);
+            };
+            Object.setPrototypeOf(window.Notification, OriginalNotification);
+            Object.defineProperty(window.Notification, 'permission', {
+                get: () => 'default'
+            });
+            
+            // Override connection property
+            Object.defineProperty(navigator, 'connection', {
+                get: () => ({
+                    effectiveType: '4g',
+                    rtt: 50,
+                    downlink: 10,
+                    saveData: false
+                })
+            });
+            
+            // Remove automation indicators
+            delete navigator.__proto__.webdriver;
         """)
         
         return page
     
     def _wait_for_rate_limit(self):
-        """Wait for rate limit delay."""
-        time.sleep(self.rate_limit)
+        """Wait for rate limit delay with randomization."""
+        # Add random jitter (0.8 to 1.5x the rate limit) to avoid detection
+        jitter = random.uniform(0.8, 1.5)
+        delay = self.rate_limit * jitter
+        time.sleep(delay)
+    
+    def _simulate_human_behavior(self, page: Page):
+        """Simulate human-like behavior on the page (mouse movements, scrolling).
+        
+        Args:
+            page: Playwright page instance.
+        """
+        try:
+            # Random mouse movement
+            viewport = page.viewport_size
+            if viewport:
+                mouse_x = random.randint(100, viewport['width'] - 100)
+                mouse_y = random.randint(100, viewport['height'] - 100)
+                page.mouse.move(mouse_x, mouse_y, steps=random.randint(5, 15))
+                page.wait_for_timeout(random.uniform(200, 500))
+            
+            # Scroll down gradually (human-like scrolling)
+            scroll_amount = random.randint(200, 500)
+            scroll_steps = random.randint(3, 8)
+            step_size = scroll_amount // scroll_steps
+            
+            for _ in range(scroll_steps):
+                page.evaluate(f"window.scrollBy(0, {step_size})")
+                page.wait_for_timeout(random.uniform(100, 300))
+            
+            # Small random scroll back up (humans don't scroll perfectly)
+            if random.random() > 0.5:
+                page.evaluate(f"window.scrollBy(0, -{random.randint(50, 150)})")
+                page.wait_for_timeout(random.uniform(200, 400))
+                
+        except Exception as e:
+            logger.debug(f"Error simulating human behavior: {e}")
+            # Continue even if simulation fails
     
     def _fetch_page(self, page: Page, url: str, wait_selector: Optional[str] = None, retries: int = 3) -> Optional[str]:
         """Fetch a page and return raw HTML with retry logic.
@@ -174,27 +365,76 @@ class ControllerScraper:
                     logger.error(f"HTTP {response.status} error for {full_url} after {attempt} attempts")
                     raise ControllerDownloadError(f"HTTP {response.status} error")
                 
-                # Wait for page to load (wait for content selector if provided)
-                if wait_selector:
+                # Wait for page to fully load
+                # First wait for DOM content to be loaded
+                try:
+                    page.wait_for_load_state('domcontentloaded', timeout=30000)
+                except Exception:
+                    logger.warning("DOM content loaded timeout, continuing")
+                
+                # Wait for actual content selector (listContainer) to appear
+                try:
+                    page.wait_for_selector('#listContainer', timeout=20000, state='attached')
+                    logger.debug("List container found, waiting for content")
+                except Exception:
+                    # Fallback: try alternative selector
                     try:
-                        page.wait_for_selector(wait_selector, timeout=10000)
+                        page.wait_for_selector('.list-container', timeout=10000, state='attached')
+                        logger.debug("List container (class) found")
                     except Exception:
-                        logger.warning(f"Selector {wait_selector} not found, continuing anyway")
-                else:
-                    # Default: wait for dynamic content and network to settle
-                    try:
-                        # Wait for network idle (max 15 seconds)
-                        page.wait_for_load_state('networkidle', timeout=15000)
-                    except Exception:
-                        # If networkidle times out, wait a bit anyway
-                        logger.debug("Network idle timeout, waiting fixed delay")
-                        page.wait_for_timeout(3000)
+                        logger.warning("List container selector not found, continuing anyway")
+                
+                # Handle cookie consent banner if present (click X to dismiss)
+                try:
+                    # Look for cookie banner close button (X)
+                    cookie_close = page.locator('button[aria-label*="close" i], button[aria-label*="dismiss" i], .cookie-banner button:has-text("X"), [class*="cookie"] button:has-text("X")')
+                    if cookie_close.count() > 0:
+                        cookie_close.first.click()
+                        logger.debug("Dismissed cookie consent banner")
+                        page.wait_for_timeout(500)  # Brief wait after clicking
+                except Exception as e:
+                    logger.debug(f"Cookie banner not found or already dismissed: {e}")
+                
+                # Wait for network to settle (reduced timeout to avoid being stuck)
+                try:
+                    page.wait_for_load_state('networkidle', timeout=10000)
+                except Exception:
+                    logger.debug("Network idle timeout, waiting fixed delay")
+                    # Wait additional time for JavaScript to render
+                    page.wait_for_timeout(random.uniform(2000, 4000))
+                
+                # Simulate human behavior (mouse movements, scrolling)
+                self._simulate_human_behavior(page)
                 
                 # Get page content
                 html_content = page.content()
                 
                 content_length = len(html_content)
                 logger.info(f"Retrieved {content_length:,} bytes from {full_url}")
+                
+                # Check for bot detection (CAPTCHA page)
+                if 'Pardon Our Interruption' in html_content or 'distil_referrer' in html_content:
+                    logger.warning(f"Bot detection page detected for {full_url}")
+                    if attempt < retries:
+                        wait_time = attempt * 10  # Longer wait for bot detection
+                        logger.warning(f"Waiting {wait_time}s before retry (attempt {attempt}/{retries})")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error(f"Bot detection page persisted after {retries} attempts for {full_url}")
+                        return None
+                
+                # Check if page content is too small (likely an error page)
+                if content_length < 50000:  # Less than 50KB is suspicious for a listings page
+                    logger.warning(f"Page content suspiciously small ({content_length} bytes) for {full_url}")
+                    # Check if it's actually an error page
+                    if 'error' in html_content.lower()[:500] or '404' in html_content[:500] or '403' in html_content[:500]:
+                        logger.warning(f"Error page detected for {full_url}")
+                        if attempt < retries:
+                            wait_time = attempt * 5
+                            time.sleep(wait_time)
+                            continue
+                        return None
                 
                 self.visited_urls.add(url)
                 
@@ -281,7 +521,10 @@ class ControllerScraper:
             return None
     
     def _extract_listings(self, html_content: str, page_url: str) -> List[Dict]:
-        """Extract basic listing information from HTML.
+        """Extract basic listing information from HTML using structured card parsing.
+        
+        Finds the list-container div, then extracts data from each list-listing-card-wrapper.
+        Only extracts URLs matching /listing/for-sale/ pattern.
         
         Args:
             html_content: HTML content as string.
@@ -292,135 +535,208 @@ class ControllerScraper:
         """
         listings = []
         scrape_timestamp = datetime.now().isoformat()
+        seen_urls = set()  # Track unique URLs to avoid duplicates
         
         try:
+            import re
             soup = BeautifulSoup(html_content, 'html.parser')
             
-            # Look for listing containers - Controller.com specific patterns
-            # Try multiple common patterns
-            listing_containers = []
+            # Find the main list container
+            list_container = soup.find('div', id='listContainer', class_=lambda x: x and 'list-container' in str(x).lower())
+            if not list_container:
+                list_container = soup.find('div', class_=lambda x: x and 'list-container' in str(x).lower())
             
-            # Pattern 1: Common listing card classes
-            listing_containers = soup.find_all(['article', 'div'], class_=lambda x: x and (
-                'listing' in str(x).lower() or 
-                'result' in str(x).lower() or 
-                'item' in str(x).lower() or
-                'card' in str(x).lower() or
-                'tile' in str(x).lower()
-            ))
+            if not list_container:
+                logger.warning("Could not find list-container div, trying alternative methods")
+                # Fallback: try to find listing cards directly
+                listing_cards = soup.find_all('div', class_='list-listing-card-wrapper')
+            else:
+                # Find all listing card wrappers within the container
+                listing_cards = list_container.find_all('div', class_='list-listing-card-wrapper')
             
-            # Pattern 2: If no results, try data attributes
-            if not listing_containers:
-                listing_containers = soup.find_all('div', attrs={'data-listing-id': True})
+            logger.info(f"Found {len(listing_cards)} listing card wrappers")
             
-            # Pattern 3: Try any div with href link (listing cards often have links)
-            if not listing_containers:
-                potential_containers = soup.find_all('div')
-                for div in potential_containers:
-                    if div.find('a', href=lambda x: x and '/listings/' in str(x)):
-                        listing_containers.append(div)
-            
-            logger.info(f"Found {len(listing_containers)} potential listing containers on page")
-            
-            for idx, container in enumerate(listing_containers, 1):
+            for card_idx, card_wrapper in enumerate(listing_cards, 1):
                 try:
                     listing_data = {
                         'listing_url': None,
                         'listing_id': None,
                         'aircraft_model': None,
+                        'aircraft_type': None,  # e.g., "Jet Aircraft", "Piston Single Aircraft"
+                        'year': None,  # Extracted from model
                         'listing_location': None,
                         'listing_price': None,
+                        'total_time_hours': None,  # Total Time
+                        'seller_name': None,
+                        'seller_phone': None,
+                        'seller_email': None,
+                        'is_premium_listing': False,
+                        'payment_estimate': None,  # "Payments as low as..."
                         'scrape_timestamp': scrape_timestamp,
                         'page_url': page_url,
-                        'position': idx
+                        'position': card_idx
                     }
                     
-                    # Extract listing URL
-                    link = container.find('a', href=True)
-                    if link:
-                        href = link.get('href', '')
-                        if href:
-                            listing_data['listing_url'] = urljoin(self.BASE_URL, href) if not href.startswith('http') else href
-                            
-                            # Try to extract listing ID from URL
-                            parsed_url = urlparse(listing_data['listing_url'])
-                            path_parts = [p for p in parsed_url.path.split('/') if p]
-                            if 'listings' in path_parts:
-                                listing_idx = path_parts.index('listings')
-                                if listing_idx + 1 < len(path_parts):
-                                    listing_data['listing_id'] = path_parts[listing_idx + 1]
+                    # Find the inner card div with data-listing-id (listing-card-grid)
+                    card_div = card_wrapper.find('div', class_='listing-card-grid', attrs={'data-listing-id': True})
+                    if not card_div:
+                        # Alternative: find div with id attribute (listing ID) - the div inside card_wrapper
+                        card_div = card_wrapper.find('div', id=re.compile(r'^\d+$'))
+                        if not card_div:
+                            # Try finding listing-card-grid without data-listing-id
+                            card_div = card_wrapper.find('div', class_='listing-card-grid')
                     
-                    # Try data attribute for listing ID
+                    # Extract Listing ID from data-listing-id attribute or id attribute
+                    if card_div:
+                        listing_id = card_div.get('data-listing-id')
+                        if not listing_id:
+                            # Try id attribute from parent div (the div with numeric id)
+                            parent_div = card_wrapper.find('div', id=re.compile(r'^\d+$'))
+                            if parent_div:
+                                listing_id = parent_div.get('id')
+                        if listing_id:
+                            listing_data['listing_id'] = str(listing_id)
+                    
+                    # Extract Listing URL - ONLY from /listing/for-sale/ pattern
+                    # Try multiple locations: title link, view details link
+                    listing_url = None
+                    
+                    # Method 1: Find link in list-listing-title-link (title link)
+                    title_link = card_wrapper.find('a', class_='list-listing-title-link', href=re.compile(r'/listing/for-sale/'))
+                    if title_link:
+                        href = title_link.get('href', '')
+                        if href and '/listing/for-sale/' in href:
+                            listing_url = urljoin(self.BASE_URL, href) if not href.startswith('http') else href
+                    
+                    # Method 2: Find link in view-listing-details-link (View Details button)
+                    if not listing_url:
+                        details_link = card_wrapper.find('a', class_='view-listing-details-link', href=re.compile(r'/listing/for-sale/'))
+                        if details_link:
+                            href = details_link.get('href', '')
+                            if href and '/listing/for-sale/' in href:
+                                listing_url = urljoin(self.BASE_URL, href) if not href.startswith('http') else href
+                    
+                    # Skip if no valid listing URL found
+                    if not listing_url:
+                        logger.debug(f"No valid listing URL found for card {card_idx}")
+                        continue
+                    
+                    # Skip duplicates
+                    if listing_url in seen_urls:
+                        continue
+                    seen_urls.add(listing_url)
+                    listing_data['listing_url'] = listing_url
+                    
+                    # Extract listing ID from URL if not already found
                     if not listing_data['listing_id']:
-                        listing_id_attr = container.get('data-listing-id') or container.get('data-id')
-                        if listing_id_attr:
-                            listing_data['listing_id'] = str(listing_id_attr)
+                        parsed_url = urlparse(listing_url)
+                        path_parts = [p for p in parsed_url.path.split('/') if p]
+                        if 'listing' in path_parts and 'for-sale' in path_parts:
+                            listing_idx = path_parts.index('for-sale')
+                            if listing_idx + 1 < len(path_parts):
+                                listing_data['listing_id'] = path_parts[listing_idx + 1]
                     
-                    # Extract aircraft model (raw text)
-                    # Look for model in common locations
-                    model_elements = [
-                        container.find('h2'),
-                        container.find('h3'),
-                        container.find('h4'),
-                        container.find('a', class_=lambda x: x and 'title' in str(x).lower()),
-                        container.find('span', class_=lambda x: x and 'model' in str(x).lower()),
-                        container.find('div', class_=lambda x: x and 'model' in str(x).lower()),
-                    ]
+                    # Extract Aircraft Model from listing-portion-title -> list-listing-title-link
+                    title_h2 = card_wrapper.find('h2', class_='listing-portion-title')
+                    if title_h2:
+                        title_link = title_h2.find('a', class_='list-listing-title-link')
+                        if title_link:
+                            listing_data['aircraft_model'] = title_link.get_text(strip=True)
+                        else:
+                            # Fallback: get text from h2 itself
+                            listing_data['aircraft_model'] = title_h2.get_text(strip=True)
                     
-                    for element in model_elements:
-                        if element:
-                            text = element.get_text(strip=True)
-                            if text and len(text) > 3:  # Minimum length filter
-                                listing_data['aircraft_model'] = text
-                                break
+                    # Extract Price from retail-price-container -> price span
+                    price_container = card_wrapper.find('div', class_='retail-price-container')
+                    if price_container:
+                        price_span = price_container.find('span', class_='price')
+                        if price_span:
+                            listing_data['listing_price'] = price_span.get_text(strip=True)
                     
-                    # Extract location (raw text)
-                    location_elements = [
-                        container.find('span', class_=lambda x: x and 'location' in str(x).lower()),
-                        container.find('div', class_=lambda x: x and 'location' in str(x).lower()),
-                        container.find('p', class_=lambda x: x and 'location' in str(x).lower()),
-                        container.find('span', class_=lambda x: x and ('city' in str(x).lower() or 'state' in str(x).lower())),
-                    ]
+                    # Extract Location from machine-location div
+                    location_div = card_wrapper.find('div', class_='machine-location')
+                    if location_div:
+                        location_text = location_div.get_text(strip=True)
+                        # Remove "Location:" prefix if present
+                        location_text = re.sub(r'^Location:\s*', '', location_text, flags=re.IGNORECASE).strip()
+                        if location_text:
+                            listing_data['listing_location'] = location_text
                     
-                    for element in location_elements:
-                        if element:
-                            listing_data['listing_location'] = element.get_text(strip=True)
-                            break
+                    # Extract Year from aircraft model (e.g., "1997 GULFSTREAM GV")
+                    if listing_data['aircraft_model']:
+                        year_match = re.search(r'\b(19\d{2}|20\d{2})\b', listing_data['aircraft_model'])
+                        if year_match:
+                            listing_data['year'] = year_match.group(1)
                     
-                    # Extract price (raw text)
-                    price_elements = [
-                        container.find('span', class_=lambda x: x and 'price' in str(x).lower()),
-                        container.find('div', class_=lambda x: x and 'price' in str(x).lower()),
-                        container.find('p', class_=lambda x: x and 'price' in str(x).lower()),
-                    ]
+                    # Extract Aircraft Type (e.g., "Jet Aircraft", "Piston Single Aircraft")
+                    aircraft_type_div = card_wrapper.find('div', class_=lambda x: x and 'aircraft-type' in str(x).lower())
+                    if not aircraft_type_div:
+                        # Try finding text that contains "Aircraft" after the model
+                        type_text = card_wrapper.get_text()
+                        type_match = re.search(r'(Jet Aircraft|Piston Single Aircraft|Piston Twin Aircraft|Turboprop Aircraft|Helicopter|Other)', type_text, re.IGNORECASE)
+                        if type_match:
+                            listing_data['aircraft_type'] = type_match.group(1)
                     
-                    for element in price_elements:
-                        if element:
-                            text = element.get_text(strip=True)
-                            if '$' in text or 'price' in text.lower():
-                                listing_data['listing_price'] = text
-                                break
+                    # Extract Total Time Hours
+                    total_time_div = card_wrapper.find('div', class_=lambda x: x and 'total-time' in str(x).lower())
+                    if not total_time_div:
+                        # Look for "Total Time:" text pattern
+                        card_text = card_wrapper.get_text()
+                        tt_match = re.search(r'Total\s+Time[:\s]+([\d,]+\.?\d*)', card_text, re.IGNORECASE)
+                        if tt_match:
+                            listing_data['total_time_hours'] = tt_match.group(1).replace(',', '')
                     
-                    # Fallback: search for $ in text anywhere in container
-                    if not listing_data['listing_price']:
-                        container_text = container.get_text()
-                        import re
-                        price_match = re.search(r'\$[\d,]+', container_text)
-                        if price_match:
-                            listing_data['listing_price'] = price_match.group(0)
+                    # Extract Seller Name
+                    seller_div = card_wrapper.find('div', class_=lambda x: x and 'seller' in str(x).lower())
+                    if seller_div:
+                        seller_text = seller_div.get_text(strip=True)
+                        seller_match = re.search(r'Seller[:\s]+(.+)', seller_text, re.IGNORECASE)
+                        if seller_match:
+                            listing_data['seller_name'] = seller_match.group(1).strip()
                     
-                    # Only add if we have at least a URL
-                    if listing_data['listing_url']:
-                        listings.append(listing_data)
+                    # Extract Seller Phone
+                    phone_link = card_wrapper.find('a', href=re.compile(r'^tel:'))
+                    if phone_link:
+                        phone_href = phone_link.get('href', '')
+                        phone_match = re.search(r'tel:([\d\-\(\)\s]+)', phone_href)
+                        if phone_match:
+                            listing_data['seller_phone'] = phone_match.group(1).strip()
+                    else:
+                        # Try finding phone in text
+                        card_text = card_wrapper.get_text()
+                        phone_match = re.search(r'(\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})', card_text)
+                        if phone_match:
+                            listing_data['seller_phone'] = phone_match.group(1).strip()
+                    
+                    # Extract Seller Email (check for email seller link)
+                    email_link = card_wrapper.find('a', href=re.compile(r'^mailto:'))
+                    if email_link:
+                        email_href = email_link.get('href', '')
+                        email_match = re.search(r'mailto:([^\s]+)', email_href)
+                        if email_match:
+                            listing_data['seller_email'] = email_match.group(1)
+                    
+                    # Check if Premium Listing
+                    premium_badge = card_wrapper.find('span', class_=lambda x: x and 'premium' in str(x).lower())
+                    if premium_badge or 'Premium Listing' in card_wrapper.get_text():
+                        listing_data['is_premium_listing'] = True
+                    
+                    # Extract Payment Estimate (e.g., "Payments as low as USD $3,847.10*")
+                    payment_text = card_wrapper.get_text()
+                    payment_match = re.search(r'Payments\s+as\s+low\s+as\s+([^\\*]+)', payment_text, re.IGNORECASE)
+                    if payment_match:
+                        listing_data['payment_estimate'] = payment_match.group(1).strip()
+                    
+                    listings.append(listing_data)
                     
                 except Exception as e:
-                    logger.warning(f"Error extracting listing {idx}: {e}")
+                    logger.warning(f"Error extracting listing from card {card_idx}: {e}")
                     continue
             
-            logger.info(f"Extracted {len(listings)} listings from page")
+            logger.info(f"Extracted {len(listings)} listings from page (after deduplication)")
             
         except Exception as e:
-            logger.error(f"Error parsing HTML: {e}")
+            logger.error(f"Error parsing HTML: {e}", exc_info=True)
         
         return listings
     
@@ -673,6 +989,7 @@ class ControllerScraper:
                 page = self._setup_page(browser)
                 
                 try:
+                    # Go directly to listings URL (no homepage visit needed - no login required)
                     current_url = self.START_URL
                     page_num = 1
                     all_listings = []
