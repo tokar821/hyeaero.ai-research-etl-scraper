@@ -3,14 +3,22 @@
 Downloads FAA Aircraft Registration Database and saves to local storage.
 """
 
+from pathlib import Path
 from scrapers.faa_scraper import FAAScraper
 from utils.logger import setup_logging, get_logger
 
 
 def main():
     """Run FAA scraper."""
-    setup_logging()
+    # Setup logging with file output
+    log_dir = Path(__file__).parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / "faa_log.txt"
+    
+    setup_logging(log_file=str(log_file), log_file_overwrite=True)
     logger = get_logger(__name__)
+    
+    logger.info(f"Log file: {log_file}")
     
     try:
         logger.info("Starting FAA Aircraft Registration Database scraper...")

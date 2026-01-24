@@ -3,13 +3,14 @@
 Scrapes AircraftExchange.com aircraft listings using multiple strategies:
 1. Index scraper - scrapes main listings page (/aircraft-for-sale/all)
 2. Manufacturer scraper - scrapes manufacturer list (/aircraft-manufacturers)
-3. Manufacturer detail scraper - scrapes manufacturer-based details (manufacturer → models → listings → details)
+3. Manufacturer detail scraper - scrapes manufacturer-based details (manufacturer -> models -> listings -> details)
 4. Detail scraper - scrapes detail pages from index listings
 
 Uses undetected-chromedriver for better bot detection evasion with human-like behavior.
 """
 
 import argparse
+import sys
 from datetime import datetime
 from pathlib import Path
 from scrapers.aircraftexchange_index_scraper_undetected import AircraftExchangeIndexScraperUndetected
@@ -17,6 +18,39 @@ from scrapers.aircraftexchange_manufacturer_scraper_undetected import AircraftEx
 from scrapers.aircraftexchange_manufacturer_detail_scraper_undetected import AircraftExchangeManufacturerDetailScraperUndetected
 from scrapers.aircraftexchange_detail_scraper_undetected import AircraftExchangeDetailScraperUndetected
 from utils.logger import setup_logging, get_logger
+
+
+class FilteredStderr:
+    """Filters out harmless Chrome driver cleanup errors from terminal output."""
+
+    def __init__(self, original_stderr):
+        self.original_stderr = original_stderr
+        self.suppressing = False
+        self.suppress_lines_remaining = 0
+
+    def write(self, text):
+        text_lower = text.lower()
+        if "exception ignored" in text_lower and ("chrome.__del__" in text_lower or "chrome" in text_lower):
+            self.suppressing = True
+            self.suppress_lines_remaining = 20
+            return
+        if self.suppressing:
+            self.suppress_lines_remaining -= 1
+            if any(p in text_lower for p in [
+                "oserror: [winerror 6]", "handle is invalid", "undetected_chromedriver",
+                "__init__.py", "line 843", "line 798"
+            ]) and self.suppress_lines_remaining > 0:
+                return
+            if self.suppress_lines_remaining > 0:
+                return
+            self.suppressing = False
+        self.original_stderr.write(text)
+
+    def flush(self):
+        self.original_stderr.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.original_stderr, name)
 
 
 def run_index_scraper(headless: bool = False, rate_limit: float = 6.0, max_pages: int = None):
@@ -88,7 +122,7 @@ def run_manufacturer_detail_scraper(
     logger = get_logger(__name__)
     logger.info("=" * 60)
     logger.info("Starting AircraftExchange MANUFACTURER DETAIL scraper...")
-    logger.info("Workflow: Manufacturer → Model Categories → Listings → Detail Pages")
+    logger.info("Workflow: Manufacturer -> Model Categories -> Listings -> Detail Pages")
     logger.info("=" * 60)
     
     scraper = AircraftExchangeManufacturerDetailScraperUndetected(headless=headless, rate_limit=rate_limit)
@@ -147,21 +181,29 @@ def main():
         description="Run AircraftExchange scraper modules",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
+Modules (run one or more with --index, --manufacturer, --manufacturer-detail, --detail):
+
+  # Run ONLY index (main listings page)
+  python run_aircraftexchange_scraper.py --index
+
+  # Run ONLY manufacturer list
+  python run_aircraftexchange_scraper.py --manufacturer
+
+  # Run ONLY manufacturer detail (manufacturer -> models -> listings -> details)
+  python run_aircraftexchange_scraper.py --manufacturer-detail
+
+  # Run ONLY detail scraper (detail pages from index; requires index run first)
+  python run_aircraftexchange_scraper.py --detail
+
   # Run all modules in sequence
   python run_aircraftexchange_scraper.py --all
-  
-  # Run only index scraper
-  python run_aircraftexchange_scraper.py --index
-  
-  # Run only manufacturer detail scraper (recommended for comprehensive coverage)
-  python run_aircraftexchange_scraper.py --manufacturer-detail
-  
-  # Run with limits (for testing)
-  python run_aircraftexchange_scraper.py --all --max-pages 2 --max-manufacturers 5 --max-listings 10
-  
-  # Run in headless mode
-  python run_aircraftexchange_scraper.py --all --headless
+
+  # With limits (for testing)
+  python run_aircraftexchange_scraper.py --index --max-pages 2
+  python run_aircraftexchange_scraper.py --manufacturer-detail --max-manufacturers 3 --max-listings 5
+
+  # Headless mode
+  python run_aircraftexchange_scraper.py --index --headless
         """
     )
     
@@ -178,7 +220,7 @@ Examples:
     parser.add_argument(
         '--manufacturer-detail',
         action='store_true',
-        help='Run manufacturer detail scraper (manufacturer → models → listings → details)'
+        help='Run manufacturer detail scraper (manufacturer -> models -> listings -> details)'
     )
     parser.add_argument(
         '--detail',
@@ -242,16 +284,25 @@ Examples:
     if not any([args.index, args.manufacturer, args.manufacturer_detail, args.detail, args.all]):
         parser.print_help()
         return
-    
-    # Setup logging
-    setup_logging()
+
+    # Suppress Chrome driver cleanup errors in terminal
+    original_stderr = sys.stderr
+    sys.stderr = FilteredStderr(original_stderr)
+
+    # Setup logging with file output
+    log_dir = Path(__file__).parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / "aircraftexchange_log.txt"
+
+    setup_logging(log_file=str(log_file), log_file_overwrite=True)
     logger = get_logger(__name__)
-    
+
     try:
         logger.info("=" * 60)
         logger.info("AircraftExchange Scraper - Starting")
         logger.info(f"Rate limit: {args.rate_limit} seconds")
         logger.info(f"Headless mode: {args.headless}")
+        logger.info(f"Log file: {log_file}")
         logger.info("=" * 60)
         
         results = {}
@@ -331,6 +382,8 @@ Examples:
     except Exception as e:
         logger.error(f"AircraftExchange scraper failed: {e}", exc_info=True)
         raise
+    finally:
+        sys.stderr = original_stderr
 
 
 if __name__ == "__main__":

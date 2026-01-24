@@ -28,6 +28,7 @@ except ImportError:
 
 from bs4 import BeautifulSoup
 from utils.logger import get_logger
+from utils.chrome_utils import get_chrome_version, safe_driver_quit
 
 logger = get_logger(__name__)
 
@@ -100,12 +101,13 @@ class ControllerDetailScraperUndetected:
         options.add_argument('--disable-blink-features=AutomationControlled')
         options.add_argument('--disable-dev-shm-usage')
         
-        # Additional human-like browser arguments
         options.add_argument('--lang=en-US')
         options.add_argument('--disable-infobars')
         
-        # Create undetected driver
-        driver = uc.Chrome(options=options, version_main=None)
+        version_main = get_chrome_version()
+        if version_main:
+            logger.info(f"Detected Chrome version: {version_main}")
+        driver = uc.Chrome(options=options, version_main=version_main)
         
         # Set window size (don't maximize - humans don't always maximize)
         driver.set_window_size(window_width, window_height)
@@ -122,11 +124,12 @@ class ControllerDetailScraperUndetected:
         return driver
     
     def _wait_for_rate_limit(self):
-        """Wait for rate limit delay with human-like randomization."""
-        # Human-like delay: base time + random variation (6-12 seconds typical)
+        """Wait for rate limit delay with human-like randomization.
+        Priority: avoid bot detection over speed. Slower = more human-like.
+        """
         base_delay = self.rate_limit
-        reading_time = random.uniform(3.0, 6.0)  # 3-6 seconds of "reading"
-        jitter = random.uniform(0.9, 1.3)  # Variation
+        reading_time = random.uniform(4.0, 8.0)  # 4-8 seconds "reading" per listing
+        jitter = random.uniform(1.0, 1.4)
         delay = base_delay + reading_time * jitter
         logger.debug(f"Human-like delay: {delay:.2f} seconds (mimicking reading time)")
         time.sleep(delay)
@@ -239,7 +242,7 @@ class ControllerDetailScraperUndetected:
                 logger.info(f"Navigating to: {full_url} (attempt {attempt}/{retries})")
                 
                 # Human-like: brief pause before navigation
-                time.sleep(random.uniform(0.5, 1.5))
+                time.sleep(random.uniform(1.0, 2.5))
                 
                 driver.get(full_url)
                 
@@ -263,16 +266,14 @@ class ControllerDetailScraperUndetected:
                 except TimeoutException:
                     logger.warning("Timeout waiting for page content, continuing anyway")
                 
-                # Human-like: Wait for page to fully render (important for dynamic content)
-                initial_wait = random.uniform(3, 6)  # 3-6 seconds initial wait
+                # Human-like: wait for page to fully render
+                initial_wait = random.uniform(4, 8)
                 logger.debug(f"Initial page load wait: {initial_wait:.2f} seconds (human-like)")
                 time.sleep(initial_wait)
                 
-                # Simulate human behavior (scrolling helps load dynamic content)
                 self._simulate_human_behavior(driver)
                 
-                # Additional wait after scrolling (content might load dynamically)
-                time.sleep(random.uniform(2, 4))
+                time.sleep(random.uniform(3, 6))
                 
                 # Get page content
                 html_content = driver.page_source
@@ -351,7 +352,43 @@ class ControllerDetailScraperUndetected:
             return None
         except Exception:
             return None
-    
+
+    def _backfill_details_from_html(
+        self, output_dir: Path, listing_urls: List[str], count: int
+    ) -> List[Dict]:
+        """Build detail_data from existing listing_*.html files (no fetch).
+        Iterates first `count` URLs in order, reads matching HTML, extracts fields.
+        """
+        detail_data: List[Dict] = []
+        for i in range(min(count, len(listing_urls))):
+            url = listing_urls[i]
+            lid = self._extract_listing_id(url)
+            if not lid:
+                logger.warning(f"Backfill: no listing ID for URL {i+1}, skipping")
+                continue
+            path = output_dir / f"listing_{lid}.html"
+            if not path.exists():
+                logger.warning(f"Backfill: missing {path.name} for URL {i+1}, skipping")
+                continue
+            try:
+                with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                    html = f.read()
+            except Exception as e:
+                logger.warning(f"Backfill: failed to read {path.name}: {e}, skipping")
+                continue
+            d = self._extract_detail_fields(html, url)
+            detail_data.append(d)
+            if (i + 1) % 50 == 0:
+                logger.info(f"Backfill: extracted {i + 1}/{count} from HTML")
+        logger.info(f"Backfill: extracted {len(detail_data)} detail records from HTML")
+        return detail_data
+
+    def _save_details_json(self, output_dir: Path, detail_data: List[Dict]) -> None:
+        """Write details_metadata.json with current detail_data."""
+        path = output_dir / "details_metadata.json"
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(detail_data, f, indent=2, ensure_ascii=False)
+
     def _extract_json_data(self, html_content: str) -> Optional[Dict]:
         """Extract embedded JSON data from HTML.
         
@@ -1100,9 +1137,14 @@ class ControllerDetailScraperUndetected:
         listing_urls: Optional[List[str]] = None,
         index_metadata_path: Optional[Path] = None,
         date: Optional[datetime] = None,
-        max_listings: Optional[int] = None
+        max_listings: Optional[int] = None,
+        start_from: int = 1,
     ) -> Dict:
-        """Scrape detail pages for listing URLs."""
+        """Scrape detail pages for listing URLs.
+        start_from: 1-based index to resume from (e.g. 373 = skip 1..372, scrape 373..).
+        Loads or backfills detail_data for 1..(start_from-1), then scrapes from start_from.
+        Saves details_metadata.json after each scraped page.
+        """
         if date is None:
             date = datetime.now()
         
@@ -1113,105 +1155,144 @@ class ControllerDetailScraperUndetected:
         
         logger.info("=" * 60)
         logger.info("Controller.com Aircraft Listing Detail Scraper (Undetected Chrome)")
-        logger.info(f"Date: {date_str}")
-        logger.info(f"Output directory: {output_dir}")
+        logger.info("Date: %s", date_str)
+        logger.info("Output directory: %s", output_dir)
         logger.info("=" * 60)
         
-        # Load URLs if not provided
         if listing_urls is None:
             if index_metadata_path is None:
                 index_dir = self.raw_controller_path / date_str / "index"
                 index_metadata_path = index_dir / "listings_metadata.json"
-            
             if not index_metadata_path.exists():
-                raise ControllerDetailScraperUndetectedError(f"Index metadata file not found: {index_metadata_path}")
-            
+                raise ControllerDetailScraperUndetectedError(
+                    f"Index metadata file not found: {index_metadata_path}"
+                )
             listing_urls = self.load_listing_urls(index_metadata_path)
         
-        if max_listings:
-            listing_urls = listing_urls[:max_listings]
-            logger.info(f"Limiting to {max_listings} listings for testing")
+        total_listings = len(listing_urls)
+        detail_data: List[Dict] = []
+        details_file = output_dir / "details_metadata.json"
+        
+        if start_from > 1:
+            if details_file.exists():
+                try:
+                    with open(details_file, 'r', encoding='utf-8') as f:
+                        detail_data = json.load(f)
+                    # Keep only first start_from - 1 to avoid duplicates when appending
+                    if len(detail_data) > start_from - 1:
+                        detail_data = detail_data[: start_from - 1]
+                    logger.info(
+                        "Loaded %d existing detail records from %s",
+                        len(detail_data),
+                        details_file.name,
+                    )
+                except Exception as e:
+                    logger.warning("Could not load existing details JSON: %s", e)
+                    detail_data = []
+            if len(detail_data) < start_from - 1:
+                logger.info(
+                    "Backfilling detail data from HTML for listings 1..%d",
+                    start_from - 1,
+                )
+                backfilled = self._backfill_details_from_html(
+                    output_dir, listing_urls, start_from - 1
+                )
+                detail_data = backfilled
+                self._save_details_json(output_dir, detail_data)
+        
+        urls_to_scrape = listing_urls[(start_from - 1) :]
+        if max_listings is not None:
+            urls_to_scrape = urls_to_scrape[:max_listings]
+            logger.info("Limiting to %d listings for this run", max_listings)
         
         result = {
             "date": date_str,
-            "total_urls": len(listing_urls),
+            "total_urls": total_listings,
             "listings_scraped": 0,
             "listings_failed": 0,
             "html_files": [],
-            "detail_data": [],
+            "detail_data": detail_data,
             "scrape_duration": 0,
-            "errors": []
+            "errors": [],
         }
         
+        if not urls_to_scrape:
+            logger.info("No listings to scrape (start_from past end or max_listings=0).")
+            result["scrape_duration"] = time.time() - start_time
+            return result
+        
         try:
-            # Setup driver
             driver = self._setup_driver()
-            
             try:
-                for idx, listing_url in enumerate(listing_urls, 1):
+                for i, listing_url in enumerate(urls_to_scrape):
+                    idx = start_from + i
                     try:
-                        logger.info(f"Processing listing {idx}/{len(listing_urls)}: {listing_url}")
+                        if i > 0:
+                            pre_pause = random.uniform(1.5, 4.0)
+                            logger.debug("Pre-listing pause: %.2f seconds", pre_pause)
+                            time.sleep(pre_pause)
                         
-                        # Rate limiting
+                        logger.info(
+                            "Processing listing %d/%d: %s",
+                            idx,
+                            total_listings,
+                            listing_url,
+                        )
                         self._wait_for_rate_limit()
                         
-                        # Fetch page
                         html_content = self._fetch_page(driver, listing_url)
-                        
                         if html_content is None:
-                            logger.warning(f"Failed to fetch {listing_url}, skipping")
+                            logger.warning("Failed to fetch %s, skipping", listing_url)
                             result["errors"].append(f"Listing {idx}: Failed to fetch (None)")
                             result["listings_failed"] += 1
                             continue
                         
-                        # Extract listing ID
                         listing_id = self._extract_listing_id(listing_url)
-                        
-                        # Save HTML
-                        html_file = self._save_html_page(html_content, listing_id or str(idx), output_dir)
+                        html_file = self._save_html_page(
+                            html_content, listing_id or str(idx), output_dir
+                        )
                         result["html_files"].append(str(html_file))
                         
-                        # Extract detail fields
-                        detail_data = self._extract_detail_fields(html_content, listing_url)
-                        result["detail_data"].append(detail_data)
+                        d = self._extract_detail_fields(html_content, listing_url)
+                        result["detail_data"].append(d)
                         result["listings_scraped"] += 1
                         
-                        logger.info(f"[OK] Scraped detail for listing {idx}/{len(listing_urls)}")
-                        
+                        self._save_details_json(output_dir, result["detail_data"])
+                        logger.info(
+                            "[OK] Scraped detail for listing %d/%d (saved JSON)",
+                            idx,
+                            total_listings,
+                        )
                     except Exception as e:
-                        logger.error(f"Error processing listing {idx} ({listing_url}): {e}", exc_info=True)
+                        logger.error(
+                            "Error processing listing %d (%s): %s",
+                            idx,
+                            listing_url,
+                            e,
+                            exc_info=True,
+                        )
                         result["errors"].append(f"Listing {idx}: {str(e)}")
                         result["listings_failed"] += 1
                         continue
-                
-                # Save detail data to JSON
-                details_file = output_dir / "details_metadata.json"
-                with open(details_file, 'w', encoding='utf-8') as f:
-                    json.dump(result["detail_data"], f, indent=2, ensure_ascii=False)
-                logger.info(f"Saved {len(result['detail_data'])} detail records to {details_file}")
-                
             finally:
-                # Clean up
-                driver.quit()
+                safe_driver_quit(driver)
             
             result["scrape_duration"] = time.time() - start_time
-            
-            # Summary
             logger.info("=" * 60)
             logger.info("Detail Scrape Summary")
-            logger.info(f"Total URLs: {result['total_urls']}")
-            logger.info(f"Listings scraped: {result['listings_scraped']}")
-            logger.info(f"Listings failed: {result['listings_failed']}")
-            logger.info(f"HTML files saved: {len(result['html_files'])}")
-            logger.info(f"Scrape duration: {result['scrape_duration']:.2f} seconds")
+            logger.info("Total listings (index): %d", result["total_urls"])
+            logger.info("Detail records in JSON: %d", len(result["detail_data"]))
+            logger.info("Listings scraped this run: %d", result["listings_scraped"])
+            logger.info("Listings failed this run: %d", result["listings_failed"])
+            logger.info("HTML files saved this run: %d", len(result["html_files"]))
+            logger.info("Scrape duration: %.2f seconds", result["scrape_duration"])
             if result["errors"]:
-                logger.warning(f"Errors encountered: {len(result['errors'])}")
+                logger.warning("Errors encountered: %d", len(result["errors"]))
             logger.info("=" * 60)
-            
             return result
             
         except Exception as e:
-            logger.error(f"Controller detail scraper failed: {e}", exc_info=True)
+            logger.error("Controller detail scraper failed: %s", e, exc_info=True)
             result["scrape_duration"] = time.time() - start_time
             raise
 

@@ -40,6 +40,7 @@ except ImportError:
 
 from bs4 import BeautifulSoup
 from utils.logger import get_logger
+from utils.chrome_utils import get_chrome_version, safe_driver_quit
 
 logger = get_logger(__name__)
 
@@ -117,8 +118,10 @@ class AircraftExchangeManufacturerScraperUndetected:
         options.add_argument('--lang=en-US')
         options.add_argument('--disable-infobars')
         
-        # Create undetected driver
-        driver = uc.Chrome(options=options, version_main=None)
+        version_main = get_chrome_version()
+        if version_main:
+            logger.info(f"Detected Chrome version: {version_main}")
+        driver = uc.Chrome(options=options, version_main=version_main)
         
         # Set window size
         driver.set_window_size(window_width, window_height)
@@ -300,8 +303,7 @@ class AircraftExchangeManufacturerScraperUndetected:
         except Exception as e:
             logger.error(f"Error scraping manufacturers list: {e}", exc_info=True)
         finally:
-            if driver:
-                driver.quit()
+            safe_driver_quit(driver)
         
         return manufacturers
     
@@ -403,12 +405,12 @@ class AircraftExchangeManufacturerScraperUndetected:
         
         driver = None
         page_num = 0
+        all_listings = []
         try:
             driver = self._setup_driver()
             
             current_url = manufacturer['url']
             page_num = 1
-            all_listings = []
             
             while current_url:
                 if max_pages and page_num > max_pages:
@@ -460,8 +462,7 @@ class AircraftExchangeManufacturerScraperUndetected:
             logger.error(f"Scraper failed for {manufacturer['name']}: {e}", exc_info=True)
             result["errors"].append(str(e))
         finally:
-            if driver:
-                driver.quit()
+            safe_driver_quit(driver)
         
         result["pages_scraped"] = page_num
         result["total_listings"] = len(all_listings)

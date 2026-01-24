@@ -37,6 +37,7 @@ except ImportError:
 
 from bs4 import BeautifulSoup
 from utils.logger import get_logger
+from utils.chrome_utils import get_chrome_version, safe_driver_quit
 
 logger = get_logger(__name__)
 
@@ -114,8 +115,10 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
         options.add_argument('--lang=en-US')
         options.add_argument('--disable-infobars')
         
-        # Create undetected driver
-        driver = uc.Chrome(options=options, version_main=None)
+        version_main = get_chrome_version()
+        if version_main:
+            logger.info(f"Detected Chrome version: {version_main}")
+        driver = uc.Chrome(options=options, version_main=version_main)
         
         # Set window size
         driver.set_window_size(window_width, window_height)
@@ -180,6 +183,18 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
             except Exception:
                 pass
     
+    def _wait_for_rate_limit(self):
+        """Wait for rate limit delay with human-like randomization.
+        Priority: avoid bot detection over speed. Slower = more human-like.
+        Matches Controller scraper behavior.
+        """
+        base_delay = self.rate_limit
+        reading_time = random.uniform(4.0, 8.0)  # 4-8 seconds "reading" per page/listing
+        jitter = random.uniform(1.0, 1.4)
+        delay = base_delay + reading_time * jitter
+        logger.debug(f"Human-like delay: {delay:.2f} seconds (mimicking reading time)")
+        time.sleep(delay)
+    
     def _fetch_page(self, driver, url: str, retries: int = 3) -> Optional[str]:
         """Fetch a page using Selenium and wait for content to load."""
         full_url = urljoin(self.BASE_URL, url) if not url.startswith('http') else url
@@ -188,7 +203,10 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
             try:
                 logger.info(f"Navigating to: {full_url} (attempt {attempt}/{retries})")
                 
-                time.sleep(random.uniform(0.5, 1.5))
+                # Human-like: brief pause before navigation (matches Controller)
+                pre_page_pause = random.uniform(1.0, 2.5)
+                logger.debug(f"Pre-navigation pause: {pre_page_pause:.2f} seconds")
+                time.sleep(pre_page_pause)
                 
                 driver.get(full_url)
                 
@@ -203,14 +221,16 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
                 except Exception as e:
                     logger.debug(f"Wait for elements failed: {e}, continuing")
                 
-                initial_wait = random.uniform(4, 7)
-                logger.debug(f"Initial page load wait: {initial_wait:.2f} seconds")
+                # Human-like: Wait for page to fully render (matches Controller)
+                initial_wait = random.uniform(4, 8)
+                logger.debug(f"Initial page load wait: {initial_wait:.2f} seconds (human-like)")
                 time.sleep(initial_wait)
                 
                 self._simulate_human_behavior(driver)
                 
-                post_scroll_wait = random.uniform(2, 4)
-                logger.debug(f"Post-scroll wait: {post_scroll_wait:.2f} seconds")
+                # Additional wait for any lazy-loaded content (matches Controller)
+                post_scroll_wait = random.uniform(3, 6)
+                logger.debug(f"Post-scroll wait: {post_scroll_wait:.2f} seconds (human-like)")
                 time.sleep(post_scroll_wait)
                 
                 html_content = driver.page_source
@@ -349,8 +369,7 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
         except Exception as e:
             logger.error(f"Error scraping manufacturer listings for {manufacturer['name']}: {e}", exc_info=True)
         finally:
-            if driver:
-                driver.quit()
+            safe_driver_quit(driver)
         
         logger.info(f"Total listings found for {manufacturer['name']}: {len(all_listings)}")
         return all_listings
@@ -428,9 +447,7 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
             logger.info(f"Processing page {page_num} for model {model_link['model_name']}...")
             
             if page_num > 1:
-                page_delay = random.uniform(self.rate_limit, self.rate_limit * 2)
-                logger.info(f"Human-like delay before page {page_num}: {page_delay:.2f} seconds")
-                time.sleep(page_delay)
+                self._wait_for_rate_limit()
             
             html_content = self._fetch_page(driver, current_url)
             
@@ -664,11 +681,15 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
                 logger.info(f"URL: {listing_url}")
                 logger.info("=" * 60)
                 
-                # Human-like delay between listings
+                # Human-like: "thinking" pause before each listing (except first) - matches Controller
                 if idx > 1:
-                    delay = random.uniform(self.rate_limit, self.rate_limit * 2)
-                    logger.info(f"Human-like delay: {delay:.2f} seconds")
-                    time.sleep(delay)
+                    pre_pause = random.uniform(1.5, 4.0)
+                    logger.debug(f"Pre-listing thinking pause: {pre_pause:.2f} seconds")
+                    time.sleep(pre_pause)
+                
+                # Human-like delay between listings (matches Controller detail scraper)
+                if idx > 1:
+                    self._wait_for_rate_limit()
                 
                 # Fetch detail page
                 html_content = self._fetch_page(driver, listing_url)
@@ -706,8 +727,7 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
             logger.error(f"Scraper failed: {e}", exc_info=True)
             result["errors"].append(str(e))
         finally:
-            if driver:
-                driver.quit()
+            safe_driver_quit(driver)
         
         result["scrape_duration"] = time.time() - start_time
         
@@ -785,9 +805,10 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
             logger.info(f"Manufacturer {idx}/{len(manufacturers)}: {manufacturer['name']}")
             logger.info("=" * 60)
             
-            # Human-like delay between manufacturers
+            # Human-like delay between manufacturers (longer pause when switching manufacturers)
             if idx > 1:
-                manufacturer_delay = random.uniform(self.rate_limit * 2, self.rate_limit * 3)
+                # Longer pause when switching to a different manufacturer (more human-like)
+                manufacturer_delay = random.uniform(8.0, 15.0)
                 logger.info(f"Human-like delay before next manufacturer: {manufacturer_delay:.2f} seconds")
                 time.sleep(manufacturer_delay)
             

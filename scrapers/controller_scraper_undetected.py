@@ -8,7 +8,10 @@ Install: pip install undetected-chromedriver selenium beautifulsoup4
 
 import hashlib
 import json
+import os
 import random
+import re
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +33,74 @@ from bs4 import BeautifulSoup
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _safe_driver_quit(driver):
+    """Safely quit Chrome driver, suppressing cleanup errors.
+    
+    This prevents 'Exception ignored' messages in terminal during garbage collection.
+    """
+    if driver:
+        try:
+            driver.quit()
+        except Exception:
+            # Silently handle cleanup errors (common with undetected-chromedriver)
+            # These are harmless and happen during garbage collection
+            pass
+
+
+def _get_chrome_version():
+    """Detect installed Chrome version to match ChromeDriver.
+    
+    Returns:
+        int: Chrome major version number (e.g., 143) or None if detection fails.
+    """
+    try:
+        # Try Windows registry method first
+        import winreg
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Google\Chrome\BLBeacon"
+            )
+            version = winreg.QueryValueEx(key, "version")[0]
+            winreg.CloseKey(key)
+            match = re.search(r'(\d+)\.', version)
+            if match:
+                return int(match.group(1))
+        except (WindowsError, OSError):
+            pass
+        
+        # Try common Chrome installation paths
+        chrome_paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe",
+        ]
+        
+        for chrome_path in chrome_paths:
+            try:
+                # Expand environment variables
+                expanded_path = os.path.expandvars(chrome_path)
+                if os.path.exists(expanded_path):
+                    result = subprocess.run(
+                        [expanded_path, "--version"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    if result.returncode == 0:
+                        match = re.search(r'(\d+)\.', result.stdout)
+                        if match:
+                            return int(match.group(1))
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                continue
+        
+        logger.warning("Could not detect Chrome version automatically, using auto-detection")
+        return None
+    except Exception as e:
+        logger.warning(f"Chrome version detection failed: {e}, using auto-detection")
+        return None
 
 
 class ControllerScraperUndetectedError(Exception):
@@ -105,8 +176,15 @@ class ControllerScraperUndetected:
         options.add_argument('--lang=en-US')
         options.add_argument('--disable-infobars')
         
-        # Create undetected driver
-        driver = uc.Chrome(options=options, version_main=None)
+        # Detect Chrome version to match ChromeDriver
+        chrome_version = _get_chrome_version()
+        if chrome_version:
+            logger.info(f"Detected Chrome version: {chrome_version}")
+        else:
+            logger.info("Using auto-detection for Chrome version")
+        
+        # Create undetected driver with detected version
+        driver = uc.Chrome(options=options, version_main=chrome_version)
         
         # Set window size (don't maximize - humans don't always maximize)
         driver.set_window_size(window_width, window_height)
@@ -296,8 +374,14 @@ class ControllerScraperUndetected:
         
         return None
     
-    def scrape_listings(self, date: Optional[datetime] = None, max_pages: Optional[int] = None) -> Dict:
-        """Scrape Controller.com listings using undetected-chromedriver."""
+    def scrape_listings(self, date: Optional[datetime] = None, max_pages: Optional[int] = None, start_page: int = 1) -> Dict:
+        """Scrape Controller.com listings using undetected-chromedriver.
+        
+        Args:
+            date: Optional date for output directory. Defaults to today.
+            max_pages: Optional maximum pages to scrape. None = all pages.
+            start_page: Page number to start from (for resuming). Default: 1.
+        """
         if date is None:
             date = datetime.now()
         
@@ -310,7 +394,21 @@ class ControllerScraperUndetected:
         logger.info("Controller.com Scraper (undetected-chromedriver)")
         logger.info(f"Date: {date_str}")
         logger.info(f"Output directory: {output_dir}")
+        if start_page > 1:
+            logger.info(f"Resuming from page: {start_page}")
         logger.info("=" * 60)
+        
+        # Load existing listings if resuming
+        all_listings = []
+        listings_file = output_dir / "listings_metadata.json"
+        if start_page > 1 and listings_file.exists():
+            try:
+                with open(listings_file, 'r', encoding='utf-8') as f:
+                    all_listings = json.load(f)
+                logger.info(f"Loaded {len(all_listings):,} existing listings from previous scrape")
+            except Exception as e:
+                logger.warning(f"Could not load existing listings: {e}, starting fresh")
+                all_listings = []
         
         result = {
             "date": date_str,
@@ -323,16 +421,23 @@ class ControllerScraperUndetected:
         }
         
         driver = None
+        page_num = start_page - 1  # Initialize before try block to avoid UnboundLocalError
+        
         try:
             driver = self._setup_driver()
             
-            # Go directly to listings URL (no homepage visit)
-            current_url = self.START_URL
-            page_num = 1
-            all_listings = []
+            # Construct URL for starting page
+            if start_page > 1:
+                current_url = f"/listings/search?page={start_page}"
+            else:
+                current_url = self.START_URL
+            page_num = start_page
             
             logger.info("=" * 60)
-            logger.info("Starting to scrape ALL pages...")
+            if start_page > 1:
+                logger.info(f"Resuming scrape from page {start_page}...")
+            else:
+                logger.info("Starting to scrape ALL pages...")
             logger.info("Stopping condition: Y = Z (current_end >= total_listings)")
             logger.info("Example: '5,093 - 5,122 of 5,122 Listings' means last page")
             logger.info("=" * 60)
@@ -346,7 +451,7 @@ class ControllerScraperUndetected:
                 logger.info(f"Processing page {page_num}...")
                 
                 # Human-like: Pause before starting to process page (like thinking)
-                if page_num > 1:
+                if page_num > start_page:
                     pre_page_pause = random.uniform(1.0, 3.0)
                     logger.debug(f"Pre-page pause: {pre_page_pause:.2f} seconds (human-like)")
                     time.sleep(pre_page_pause)
@@ -367,8 +472,8 @@ class ControllerScraperUndetected:
                 # Extract pagination info
                 pagination_info = self._extract_pagination_info(html_content)
                 
-                # On page 1: Get total count and calculate expected pages
-                if page_num == 1 and pagination_info:
+                # On first page (or start_page): Get total count and calculate expected pages
+                if page_num == start_page and pagination_info:
                     result["total_listings_count"] = pagination_info['total_listings']
                     total_listings = pagination_info['total_listings']
                     listings_per_page = pagination_info['current_end'] - pagination_info['current_start'] + 1
@@ -404,11 +509,6 @@ class ControllerScraperUndetected:
                     logger.info("=" * 60)
                     break
                 
-                # Fallback: Check if we've scraped close to total (safety mechanism)
-                if result.get("total_listings_count") and len(all_listings) >= result["total_listings_count"] * 0.95:
-                    logger.info(f"Scraped {len(all_listings):,} listings, close to total ({result['total_listings_count']:,}) - assuming complete")
-                    break
-                
                 # Find next page URL
                 next_url = self._find_next_page_url(html_content, current_url)
                 if next_url:
@@ -418,6 +518,13 @@ class ControllerScraperUndetected:
                         current_url = next_url
                     page_num += 1
                 else:
+                    # No next page found - check if we're close to total (fallback safety check)
+                    if result.get("total_listings_count"):
+                        scraped_ratio = len(all_listings) / result["total_listings_count"]
+                        if scraped_ratio >= 0.99:
+                            logger.info(f"No next page found and scraped {len(all_listings):,} listings ({scraped_ratio*100:.1f}% of {result['total_listings_count']:,}) - assuming complete")
+                        else:
+                            logger.warning(f"No next page found but only scraped {len(all_listings):,} listings ({scraped_ratio*100:.1f}% of {result['total_listings_count']:,}) - may be incomplete")
                     logger.info("No next page URL found - pagination complete")
                     break
                 
@@ -425,8 +532,7 @@ class ControllerScraperUndetected:
             logger.error(f"Scraper failed: {e}", exc_info=True)
             result["errors"].append(str(e))
         finally:
-            if driver:
-                driver.quit()
+            _safe_driver_quit(driver)
         
         result["pages_scraped"] = page_num
         result["total_listings"] = len(all_listings)
@@ -435,7 +541,6 @@ class ControllerScraperUndetected:
         
         # Final JSON save (already saved incrementally, but ensure final save)
         if all_listings:
-            listings_file = output_dir / "listings_metadata.json"
             with open(listings_file, 'w', encoding='utf-8') as f:
                 json.dump(all_listings, f, indent=2, ensure_ascii=False)
             logger.info(f"Final save: {len(all_listings):,} total listings saved to JSON")

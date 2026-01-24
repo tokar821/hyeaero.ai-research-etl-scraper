@@ -37,6 +37,7 @@ except ImportError:
 
 from bs4 import BeautifulSoup
 from utils.logger import get_logger
+from utils.chrome_utils import get_chrome_version, safe_driver_quit
 
 logger = get_logger(__name__)
 
@@ -113,8 +114,10 @@ class AircraftExchangeIndexScraperUndetected:
         options.add_argument('--lang=en-US')
         options.add_argument('--disable-infobars')
         
-        # Create undetected driver
-        driver = uc.Chrome(options=options, version_main=None)
+        version_main = get_chrome_version()
+        if version_main:
+            logger.info(f"Detected Chrome version: {version_main}")
+        driver = uc.Chrome(options=options, version_main=version_main)
         
         # Set window size (don't maximize - humans don't always maximize)
         driver.set_window_size(window_width, window_height)
@@ -174,6 +177,18 @@ class AircraftExchangeIndexScraperUndetected:
             except Exception:
                 pass
     
+    def _wait_for_rate_limit(self):
+        """Wait for rate limit delay with human-like randomization.
+        Priority: avoid bot detection over speed. Slower = more human-like.
+        Matches Controller scraper behavior.
+        """
+        base_delay = self.rate_limit
+        reading_time = random.uniform(3.0, 6.0)  # 3-6 seconds "reading" per page
+        jitter = random.uniform(0.9, 1.3)
+        delay = base_delay + reading_time * jitter
+        logger.debug(f"Human-like delay: {delay:.2f} seconds (mimicking reading time)")
+        time.sleep(delay)
+    
     def _fetch_page(self, driver, url: str, retries: int = 3) -> Optional[str]:
         """Fetch a page using Selenium and wait for content to load."""
         full_url = urljoin(self.BASE_URL, url) if not url.startswith('http') else url
@@ -182,8 +197,10 @@ class AircraftExchangeIndexScraperUndetected:
             try:
                 logger.info(f"Navigating to: {full_url} (attempt {attempt}/{retries})")
                 
-                # Human-like: brief pause before navigation
-                time.sleep(random.uniform(0.5, 1.5))
+                # Human-like: brief pause before navigation (matches Controller)
+                pre_page_pause = random.uniform(1.0, 2.5)
+                logger.debug(f"Pre-navigation pause: {pre_page_pause:.2f} seconds")
+                time.sleep(pre_page_pause)
                 
                 driver.get(full_url)
                 
@@ -205,16 +222,16 @@ class AircraftExchangeIndexScraperUndetected:
                 except Exception as e:
                     logger.debug(f"Wait for elements failed: {e}, continuing")
                 
-                # Human-like: Wait for page to fully render
-                initial_wait = random.uniform(4, 7)
+                # Human-like: Wait for page to fully render (matches Controller)
+                initial_wait = random.uniform(4, 8)
                 logger.debug(f"Initial page load wait: {initial_wait:.2f} seconds (human-like)")
                 time.sleep(initial_wait)
                 
                 # Simulate human behavior
                 self._simulate_human_behavior(driver)
                 
-                # Additional wait for any lazy-loaded content
-                post_scroll_wait = random.uniform(2, 4)
+                # Additional wait for any lazy-loaded content (matches Controller)
+                post_scroll_wait = random.uniform(3, 6)
                 logger.debug(f"Post-scroll wait: {post_scroll_wait:.2f} seconds (human-like)")
                 time.sleep(post_scroll_wait)
                 
@@ -293,12 +310,12 @@ class AircraftExchangeIndexScraperUndetected:
         
         driver = None
         page_num = 0
+        all_listings = []
         try:
             driver = self._setup_driver()
             
             current_url = self.START_URL
             page_num = 1
-            all_listings = []
             
             logger.info("=" * 60)
             logger.info("Starting to scrape listings pages...")
@@ -312,11 +329,9 @@ class AircraftExchangeIndexScraperUndetected:
                 
                 logger.info(f"Processing page {page_num}...")
                 
-                # Human-like pause before processing page
+                # Human-like delay between pages (matches Controller scraper)
                 if page_num > 1:
-                    page_delay = random.uniform(self.rate_limit, self.rate_limit * 2)
-                    logger.info(f"Human-like delay before page {page_num}: {page_delay:.2f} seconds")
-                    time.sleep(page_delay)
+                    self._wait_for_rate_limit()
                 
                 # Fetch page
                 html_content = self._fetch_page(driver, current_url)
@@ -357,8 +372,7 @@ class AircraftExchangeIndexScraperUndetected:
             logger.error(f"Scraper failed: {e}", exc_info=True)
             result["errors"].append(str(e))
         finally:
-            if driver:
-                driver.quit()
+            safe_driver_quit(driver)
         
         result["pages_scraped"] = page_num
         result["total_listings"] = len(all_listings)
