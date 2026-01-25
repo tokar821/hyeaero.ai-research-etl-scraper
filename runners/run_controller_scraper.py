@@ -10,7 +10,12 @@ import os
 import sys
 import warnings
 from contextlib import redirect_stderr
+from datetime import datetime
 from pathlib import Path
+
+# Add parent directory to path so imports work from runners/ directory
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from scrapers.controller_scraper_undetected import ControllerScraperUndetected
 from utils.logger import setup_logging, get_logger
 
@@ -90,7 +95,19 @@ Examples:
         '--start-page',
         type=int,
         default=1,
-        help='Page number to start from (for resuming). Default: 1'
+        help='Ignored (skip-if-exists). Kept for compat.'
+    )
+    parser.add_argument(
+        '--max-pages',
+        type=int,
+        default=None,
+        help='Max pages to fetch this run (existing HTML skipped). Default: all'
+    )
+    parser.add_argument(
+        '--date',
+        type=str,
+        default=None,
+        help='Use data for YYYY-MM-DD (default: today). Index paths use this date.'
     )
     parser.add_argument(
         '--headless',
@@ -115,35 +132,42 @@ Examples:
     warnings.filterwarnings('ignore', category=RuntimeWarning)
     
     # Setup logging with file output
-    log_dir = Path(__file__).parent / "logs"
+    log_dir = Path(__file__).parent.parent / "logs"
     log_dir.mkdir(exist_ok=True)
     log_file = log_dir / "controller_log.txt"
     
     setup_logging(log_file=str(log_file), log_file_overwrite=True)
     logger = get_logger(__name__)
     
+    date_arg = None
+    if args.date:
+        try:
+            date_arg = datetime.strptime(args.date, "%Y-%m-%d")
+        except ValueError:
+            logger.error("Invalid --date %s; use YYYY-MM-DD", args.date)
+            raise SystemExit(1)
+        logger.info("Using date: %s", args.date)
+    
     try:
         logger.info("=" * 60)
         logger.info("Starting Controller.com aircraft listings scraper...")
         logger.info("Using undetected-chromedriver with human-like behavior")
-        logger.info("Priority: Bot Detection Bypass > Speed")
-        if args.start_page > 1:
-            logger.info(f"Resuming from page: {args.start_page}")
+        logger.info("Skip-if-exists + backfill: same date re-runs safe; no overwrite/delete.")
         logger.info(f"Log file: {log_file}")
         logger.info("=" * 60)
         
-        # Initialize scraper with human-like rate limit (6 seconds base, 6-12s actual)
-        # Slower but more human-like to avoid bot detection
         scraper = ControllerScraperUndetected(rate_limit=args.rate_limit, headless=args.headless)
-        
-        # Scrape ALL pages (no limit) - stops automatically when Y = Z (current_end >= total_listings)
-        # Pagination pattern: "X - Y of Z Listings" - stops when Y >= Z
-        result = scraper.scrape_listings(max_pages=None, start_page=args.start_page)  # Scrape all pages
+        result = scraper.scrape_listings(
+            date=date_arg,
+            max_pages=args.max_pages,
+            start_page=args.start_page,
+        )
         
         logger.info("=" * 60)
         logger.info("Controller Scraper Completed!")
         logger.info(f"Date: {result['date']}")
-        logger.info(f"Pages scraped: {result['pages_scraped']}")
+        logger.info(f"Pages scraped this run: {result['pages_scraped']}")
+        logger.info(f"Pages skipped (existing HTML): {result.get('pages_skipped', 0)}")
         logger.info(f"Total listings: {result['total_listings']}")
         logger.info(f"HTML files saved: {len(result['html_files'])}")
         logger.info(f"Scrape duration: {result['scrape_duration']:.2f} seconds")

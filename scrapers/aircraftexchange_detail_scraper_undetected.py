@@ -266,16 +266,24 @@ class AircraftExchangeDetailScraperUndetected:
         
         return None
     
-    def scrape_details(self, listings_metadata_path: Optional[Path] = None, date: Optional[datetime] = None, max_listings: Optional[int] = None) -> Dict:
+    def scrape_details(
+        self,
+        listings_metadata_path: Optional[Path] = None,
+        date: Optional[datetime] = None,
+        max_listings: Optional[int] = None,
+        start_from: int = 1,
+    ) -> Dict:
         """Scrape detail pages for listings from metadata JSON.
         
-        Args:
-            listings_metadata_path: Path to listings_metadata.json file. If None, looks for latest.
-            date: Date for organizing scraped data. If None, uses today.
-            max_listings: Maximum number of listings to scrape. None = all listings.
+        Skip-if-exists: Always loads existing details_metadata.json. Skips fetching for any
+        listing whose listing_url already has a detail record. Re-running is safe; no
+        duplicates, no need to track --start-from.
         
-        Returns:
-            Dictionary with scrape results.
+        Args:
+            listings_metadata_path: Path to listings_metadata.json. If None, uses date_str/index/listings_metadata.json.
+            date: Date for paths. If None, uses today.
+            max_listings: Max *new* detail pages to scrape this run. None = no limit. Existing are skipped.
+            start_from: Unused when skip-if-exists (always process 1..N, skip existing). Kept for API compat.
         """
         if date is None:
             date = datetime.now()
@@ -285,9 +293,7 @@ class AircraftExchangeDetailScraperUndetected:
         output_dir = self.raw_aircraftexchange_path / date_str / "details"
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Load listings metadata
         if listings_metadata_path is None:
-            # Try to find latest metadata file
             index_dir = self.raw_aircraftexchange_path / date_str / "index"
             listings_metadata_path = index_dir / "listings_metadata.json"
         
@@ -296,108 +302,149 @@ class AircraftExchangeDetailScraperUndetected:
         
         logger.info("=" * 60)
         logger.info("AircraftExchange Detail Scraper")
-        logger.info(f"Loading listings from: {listings_metadata_path}")
+        logger.info("Loading listings from: %s", listings_metadata_path)
+        logger.info("Skip-if-exists: skip already-scraped listings; re-runs are safe.")
         logger.info("=" * 60)
         
         with open(listings_metadata_path, 'r', encoding='utf-8') as f:
             listings = json.load(f)
         
-        logger.info(f"Loaded {len(listings)} listings from metadata")
+        total_listings = len(listings)
+        logger.info("Loaded %d listings from metadata", total_listings)
         
-        if max_listings:
-            listings = listings[:max_listings]
-            logger.info(f"Limiting to {max_listings} listings for testing")
+        details_data = []
+        details_file = output_dir / "details_metadata.json"
+        if details_file.exists():
+            try:
+                with open(details_file, 'r', encoding='utf-8') as f:
+                    details_data = json.load(f)
+                logger.info("Loaded %d existing detail records from %s", len(details_data), details_file.name)
+            except Exception as e:
+                logger.warning("Could not load existing details JSON: %s", e)
+                details_data = []
+        
+        done_urls = {r.get("listing_url") for r in details_data if r.get("listing_url")}
+        
+        # Backfill from HTML: we have listing_*.html but no JSON record (e.g. crash before save)
+        backfilled = 0
+        for i, listing in enumerate(listings):
+            listing_url = listing.get("listing_url")
+            if not listing_url or listing_url in done_urls:
+                continue
+            listing_id = self._extract_listing_id(listing_url)
+            idx = i + 1
+            html_filename = f"listing_{listing_id}.html" if listing_id else f"listing_{idx:06d}.html"
+            path = output_dir / html_filename
+            if not path.exists():
+                continue
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    html = f.read()
+            except Exception as e:
+                logger.warning("Backfill: could not read %s: %s", path.name, e)
+                continue
+            detail_rec = self._extract_detail_fields(html, listing_url, listing)
+            details_data.append(detail_rec)
+            done_urls.add(listing_url)
+            backfilled += 1
+        if backfilled:
+            with open(details_file, "w", encoding="utf-8") as f:
+                json.dump(details_data, f, indent=2, ensure_ascii=False)
+            logger.info("Backfill: added %d detail records from HTML -> JSON", backfilled)
+        
+        if done_urls:
+            logger.info("Skipping %d already-scraped listings", len(done_urls))
+        if max_listings is not None:
+            logger.info("Limiting to %d new scrapes this run", max_listings)
         
         result = {
             "date": date_str,
             "listings_scraped": 0,
+            "listings_skipped": 0,
             "html_files": [],
-            "details_data": [],
+            "details_data": details_data,
             "scrape_duration": 0,
-            "errors": []
+            "errors": [],
         }
+        
+        if len(done_urls) >= total_listings:
+            logger.info("All %d listings already scraped; nothing to do.", total_listings)
+            result["scrape_duration"] = time.time() - start_time
+            return result
         
         driver = None
         try:
             driver = self._setup_driver()
-            
-            for idx, listing in enumerate(listings, 1):
+            scraped_this_run = 0
+            for i, listing in enumerate(listings):
+                idx = i + 1
                 listing_url = listing.get('listing_url')
                 if not listing_url:
-                    logger.warning(f"Listing {idx} missing URL, skipping")
+                    logger.warning("Listing %d missing URL, skipping", idx)
                     continue
                 
+                if listing_url in done_urls:
+                    result["listings_skipped"] += 1
+                    logger.debug("Skipping listing %d/%d (already scraped): %s", idx, total_listings, listing_url)
+                    continue
+                
+                if max_listings is not None and scraped_this_run >= max_listings:
+                    logger.info("Reached max_listings=%d new scrapes; stopping.", max_listings)
+                    break
+                
                 logger.info("=" * 60)
-                logger.info(f"Scraping listing {idx}/{len(listings)}: {listing.get('aircraft_model', 'Unknown')}")
-                logger.info(f"URL: {listing_url}")
+                logger.info("Scraping listing %d/%d: %s", idx, total_listings, listing.get('aircraft_model', 'Unknown'))
+                logger.info("URL: %s", listing_url)
                 logger.info("=" * 60)
                 
-                # Human-like: "thinking" pause before each listing (except first) - matches Controller
-                if idx > 1:
+                if scraped_this_run > 0:
                     pre_pause = random.uniform(1.5, 4.0)
-                    logger.debug(f"Pre-listing thinking pause: {pre_pause:.2f} seconds")
+                    logger.debug("Pre-listing thinking pause: %.2f seconds", pre_pause)
                     time.sleep(pre_pause)
-                
-                # Human-like delay between listings (matches Controller detail scraper)
-                if idx > 1:
+                if scraped_this_run > 0:
                     self._wait_for_rate_limit()
                 
-                # Fetch detail page
                 html_content = self._fetch_page(driver, listing_url)
-                
                 if not html_content:
-                    logger.error(f"Failed to fetch detail page for listing {idx}")
+                    logger.error("Failed to fetch detail page for listing %d", idx)
                     result["errors"].append(f"Failed to fetch: {listing_url}")
                     continue
                 
-                # Extract listing ID from URL
                 listing_id = self._extract_listing_id(listing_url)
-                
-                # Save HTML
                 html_filename = f"listing_{listing_id}.html" if listing_id else f"listing_{idx:06d}.html"
                 html_filepath = output_dir / html_filename
                 with open(html_filepath, 'wb') as f:
                     f.write(html_content.encode('utf-8'))
                 result["html_files"].append(str(html_filepath))
-                logger.info(f"Saved HTML: {html_filename}")
+                logger.info("Saved HTML: %s", html_filename)
                 
-                # Extract detail fields
                 detail_data = self._extract_detail_fields(html_content, listing_url, listing)
-                
-                # Save to results
                 result["details_data"].append(detail_data)
                 result["listings_scraped"] += 1
+                scraped_this_run += 1
+                done_urls.add(listing_url)
                 
-                # Save incremental JSON
-                details_file = output_dir / "details_metadata.json"
                 with open(details_file, 'w', encoding='utf-8') as f:
                     json.dump(result["details_data"], f, indent=2, ensure_ascii=False)
-                logger.info(f"Incremental save: {len(result['details_data'])} details saved")
+                logger.info("Incremental save: %d details saved", len(result["details_data"]))
                 
         except Exception as e:
-            logger.error(f"Scraper failed: {e}", exc_info=True)
+            logger.error("Scraper failed: %s", e, exc_info=True)
             result["errors"].append(str(e))
         finally:
             safe_driver_quit(driver)
         
         result["scrape_duration"] = time.time() - start_time
-        
-        # Final JSON save
-        if result["details_data"]:
-            details_file = output_dir / "details_metadata.json"
-            with open(details_file, 'w', encoding='utf-8') as f:
-                json.dump(result["details_data"], f, indent=2, ensure_ascii=False)
-            logger.info(f"Final save: {len(result['details_data'])} details saved")
-        
         logger.info("=" * 60)
         logger.info("Scrape Summary")
-        logger.info(f"Listings scraped: {result['listings_scraped']}/{len(listings)}")
-        logger.info(f"HTML files saved: {len(result['html_files'])}")
-        logger.info(f"Scrape duration: {result['scrape_duration']:.2f} seconds")
+        logger.info("Listings scraped this run: %d", result["listings_scraped"])
+        logger.info("Listings skipped (already scraped): %d", result.get("listings_skipped", 0))
+        logger.info("Detail records in JSON: %d", len(result["details_data"]))
+        logger.info("HTML files saved this run: %d", len(result["html_files"]))
+        logger.info("Scrape duration: %.2f seconds", result["scrape_duration"])
         if result["errors"]:
-            logger.warning(f"Errors encountered: {len(result['errors'])}")
+            logger.warning("Errors encountered: %d", len(result["errors"]))
         logger.info("=" * 60)
-        
         return result
     
     def _extract_listing_id(self, url: str) -> Optional[str]:

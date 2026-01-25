@@ -298,25 +298,50 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
         logger.info(f"URL: {manufacturer['url']}")
         logger.info("=" * 60)
         
+        # Load existing listings JSON (skip-if-exists + backfill)
+        listings_file = output_dir / "manufacturer_listings_metadata.json"
         all_listings = []
+        existing_urls = set()
+        
+        if listings_file.exists():
+            try:
+                with open(listings_file, 'r', encoding='utf-8') as f:
+                    all_listings = json.load(f)
+                existing_urls = {l.get('listing_url') for l in all_listings if l.get('listing_url')}
+                logger.info(f"Loaded {len(all_listings)} existing listings from JSON (skip-if-exists)")
+            except Exception as e:
+                logger.warning(f"Could not load existing listings JSON: {e}")
+                all_listings = []
+        
+        # Check if manufacturer page HTML exists - read it instead of fetching
+        mfg_html_file = output_dir / "manufacturer_page.html"
+        manufacturer_html = None
+        if mfg_html_file.exists():
+            try:
+                with open(mfg_html_file, 'r', encoding='utf-8', errors='replace') as f:
+                    manufacturer_html = f.read()
+                logger.info(f"Loaded existing manufacturer page HTML (skip-if-exists)")
+            except Exception as e:
+                logger.warning(f"Could not read existing manufacturer page HTML: {e}")
+        
         driver = None
         
         try:
-            driver = self._setup_driver()
-            
-            # Step 1: Visit manufacturer page to get model category links
-            logger.info("Step 1: Fetching manufacturer page to find model categories...")
-            manufacturer_html = self._fetch_page(driver, manufacturer['url'])
+            # Only start browser if we need to fetch manufacturer page or model pages
+            if not manufacturer_html:
+                driver = self._setup_driver()
+                logger.info("Step 1: Fetching manufacturer page to find model categories...")
+                manufacturer_html = self._fetch_page(driver, manufacturer['url'])
             
             if not manufacturer_html:
-                logger.error(f"Failed to fetch manufacturer page for {manufacturer['name']}")
-                return []
+                logger.error(f"Failed to get manufacturer page for {manufacturer['name']}")
+                return all_listings
             
-            # Save manufacturer page HTML
-            mfg_html_file = output_dir / "manufacturer_page.html"
-            with open(mfg_html_file, 'wb') as f:
-                f.write(manufacturer_html.encode('utf-8'))
-            logger.info(f"Saved manufacturer page HTML")
+            # Save manufacturer page HTML if we just fetched it
+            if driver and not mfg_html_file.exists():
+                with open(mfg_html_file, 'wb') as f:
+                    f.write(manufacturer_html.encode('utf-8'))
+                logger.info(f"Saved manufacturer page HTML")
             
             # Extract model category links
             model_links = self._extract_model_category_links(manufacturer_html, manufacturer['url'])
@@ -328,12 +353,66 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
                 direct_listings = self._extract_listings_from_manufacturer_page(manufacturer_html, manufacturer['url'], manufacturer['name'])
                 if direct_listings:
                     logger.info(f"Found {len(direct_listings)} direct listings on manufacturer page")
-                    all_listings.extend(direct_listings)
+                    # Only add new listings (by URL)
+                    for listing in direct_listings:
+                        if listing.get('listing_url') and listing['listing_url'] not in existing_urls:
+                            all_listings.append(listing)
+                            existing_urls.add(listing['listing_url'])
+                    # Save incremental JSON
+                    if all_listings:
+                        with open(listings_file, 'w', encoding='utf-8') as f:
+                            json.dump(all_listings, f, indent=2, ensure_ascii=False)
                     return all_listings
             
             if max_models:
                 model_links = model_links[:max_models]
                 logger.info(f"Limiting to {max_models} model categories")
+            
+            # Check if all model pages already exist - early exit (avoid starting browser)
+            all_models_done = True
+            for model_link in model_links:
+                model_name = model_link.get('model_name', 'unknown').lower().replace(' ', '_')
+                model_output_dir = output_dir / f"models" / model_name
+                if model_output_dir.exists():
+                    done_pages = self._discover_done_pages(model_output_dir)
+                    if not done_pages:
+                        all_models_done = False
+                        break
+                else:
+                    all_models_done = False
+                    break
+            
+            # If all model pages exist, backfill from HTML and return (no browser needed)
+            if all_models_done:
+                logger.info(f"All model pages already exist for {manufacturer['name']}; backfilling from HTML...")
+                # Backfill listings from all existing HTML pages
+                for model_link in model_links:
+                    model_name = model_link.get('model_name', 'unknown').lower().replace(' ', '_')
+                    model_output_dir = output_dir / f"models" / model_name
+                    done_pages = self._discover_done_pages(model_output_dir)
+                    for page_num in done_pages:
+                        html_path = self._page_html_path(page_num, model_output_dir)
+                        if html_path.exists():
+                            try:
+                                with open(html_path, 'r', encoding='utf-8', errors='replace') as f:
+                                    html = f.read()
+                                listings = self._extract_listings_from_manufacturer_page(html, model_link['url'], manufacturer['name'])
+                                for li in listings:
+                                    if li.get('listing_url') and li['listing_url'] not in existing_urls:
+                                        all_listings.append(li)
+                                        existing_urls.add(li['listing_url'])
+                            except Exception as e:
+                                logger.debug(f"Backfill: could not read {html_path.name}: {e}")
+                # Save backfilled listings
+                if all_listings:
+                    with open(listings_file, 'w', encoding='utf-8') as f:
+                        json.dump(all_listings, f, indent=2, ensure_ascii=False)
+                logger.info(f"All model pages already scraped for {manufacturer['name']}; nothing to do. Total listings: {len(all_listings)}")
+                return all_listings
+            
+            # Start browser if not already started (needed for model pages)
+            if not driver:
+                driver = self._setup_driver()
             
             # Step 2: Visit each model category page and extract listings
             for model_idx, model_link in enumerate(model_links, 1):
@@ -348,7 +427,7 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
                     logger.info(f"Human-like delay before next model: {model_delay:.2f} seconds")
                     time.sleep(model_delay)
                 
-                # Scrape listings from this model category page
+                # Scrape listings from this model category page (skip-if-exists + backfill)
                 model_listings = self._scrape_model_category_listings(
                     driver, 
                     model_link, 
@@ -357,12 +436,20 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
                     date_str,
                     max_pages
                 )
-                logger.info(f"Found {len(model_listings)} listings for {model_link.get('model_name', 'Unknown')}")
-                all_listings.extend(model_listings)
                 
-                # Save incremental JSON
+                # Only add new listings (by URL) to avoid duplicates
+                new_count = 0
+                for listing in model_listings:
+                    listing_url = listing.get('listing_url')
+                    if listing_url and listing_url not in existing_urls:
+                        all_listings.append(listing)
+                        existing_urls.add(listing_url)
+                        new_count += 1
+                
+                logger.info(f"Found {len(model_listings)} listings for {model_link.get('model_name', 'Unknown')} ({new_count} new, {len(model_listings) - new_count} already in JSON)")
+                
+                # Save incremental JSON after each model
                 if all_listings:
-                    listings_file = output_dir / "manufacturer_listings_metadata.json"
                     with open(listings_file, 'w', encoding='utf-8') as f:
                         json.dump(all_listings, f, indent=2, ensure_ascii=False)
         
@@ -417,8 +504,22 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
         
         return model_links
     
+    def _page_html_path(self, page_num: int, model_output_dir: Path) -> Path:
+        """Get path for page HTML file."""
+        return model_output_dir / f"page_{page_num:04d}.html"
+    
+    def _discover_done_pages(self, model_output_dir: Path) -> List[int]:
+        """Discover existing HTML pages for a model."""
+        pages = []
+        for f in model_output_dir.glob("page_*.html"):
+            m = re.match(r"page_(\d+)\.html", f.name)
+            if m:
+                pages.append(int(m.group(1)))
+        return sorted(pages)
+    
     def _scrape_model_category_listings(self, driver, model_link: Dict, manufacturer_name: str, output_dir: Path, date_str: str, max_pages: Optional[int] = None) -> List[Dict]:
         """Scrape listings from a model category page (handles pagination).
+        Skip-if-exists + backfill: skips existing HTML pages, backfills listings from HTML if needed.
         
         Args:
             driver: Selenium driver instance.
@@ -436,6 +537,27 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
         model_output_dir = output_dir / f"models" / model_name
         model_output_dir.mkdir(parents=True, exist_ok=True)
         
+        # Discover existing HTML pages
+        done_pages = self._discover_done_pages(model_output_dir)
+        done_pages_set = set(done_pages)
+        
+        # Backfill: extract listings from existing HTML pages
+        for page_num in done_pages:
+            html_path = self._page_html_path(page_num, model_output_dir)
+            try:
+                with open(html_path, 'r', encoding='utf-8', errors='replace') as f:
+                    html_content = f.read()
+                listings = self._extract_listings_from_manufacturer_page(html_content, model_link['url'], manufacturer_name)
+                all_listings.extend(listings)
+                logger.debug(f"Backfill: extracted {len(listings)} listings from existing page_{page_num:04d}.html")
+            except Exception as e:
+                logger.warning(f"Backfill: could not read {html_path.name}: {e}")
+                # Remove from done_pages_set so we re-fetch it
+                done_pages_set.discard(page_num)
+        
+        if done_pages:
+            logger.info(f"Found {len(done_pages)} existing HTML pages for model {model_link['model_name']} (skip-if-exists)")
+        
         current_url = model_link['url']
         page_num = 1
         
@@ -443,6 +565,31 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
             if max_pages and page_num > max_pages:
                 logger.info(f"Reached max pages limit ({max_pages}) for model {model_link['model_name']}")
                 break
+            
+            # Skip if HTML already exists
+            if page_num in done_pages_set:
+                logger.debug(f"Skipping page {page_num} for model {model_link['model_name']} (HTML exists)")
+                # Try to read URL from existing HTML to get next page URL
+                html_path = self._page_html_path(page_num, model_output_dir)
+                try:
+                    with open(html_path, 'r', encoding='utf-8', errors='replace') as f:
+                        html_content = f.read()
+                    next_url = self._find_next_page_url(html_content, current_url)
+                    if next_url:
+                        if next_url.startswith(self.BASE_URL):
+                            current_url = next_url[len(self.BASE_URL):]
+                        else:
+                            current_url = next_url
+                        page_num += 1
+                        continue
+                    else:
+                        # No next page, we're done
+                        logger.info(f"No next page URL found for model {model_link['model_name']} - pagination complete")
+                        break
+                except Exception as e:
+                    logger.warning(f"Could not read existing HTML for page {page_num}, will re-fetch: {e}")
+                    done_pages_set.discard(page_num)
+                    # Continue to fetch below
             
             logger.info(f"Processing page {page_num} for model {model_link['model_name']}...")
             
@@ -625,15 +772,8 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
     
     def scrape_manufacturer_details(self, manufacturer: Dict, listings: List[Dict], date: Optional[datetime] = None, max_listings: Optional[int] = None) -> Dict:
         """Scrape detail pages for listings from a manufacturer.
-        
-        Args:
-            manufacturer: Dictionary with manufacturer info.
-            listings: List of listing dictionaries with listing_url.
-            date: Date for organizing scraped data.
-            max_listings: Maximum number of listings to scrape. None = all listings.
-        
-        Returns:
-            Dictionary with scrape results.
+        Skip-if-exists + backfill (same date). Re-runs skip by listing_url; append only new.
+        If HTML exists but JSON not saved, backfill from HTML -> JSON.
         """
         if date is None:
             date = datetime.now()
@@ -645,83 +785,123 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
         
         output_dir = self.raw_aircraftexchange_path / date_str / "manufacturers" / f"{manufacturer_id}_{manufacturer_name}" / "details"
         output_dir.mkdir(parents=True, exist_ok=True)
-        
-        logger.info("=" * 60)
-        logger.info(f"Scraping detail pages for {manufacturer['name']}")
-        logger.info(f"Total listings to scrape: {len(listings)}")
-        logger.info("=" * 60)
+        details_file = output_dir / "details_metadata.json"
         
         if max_listings:
             listings = listings[:max_listings]
-            logger.info(f"Limiting to {max_listings} listings for testing")
+            logger.info("Limiting to %d listings for this manufacturer", max_listings)
         
+        details_data = []
+        if details_file.exists():
+            try:
+                with open(details_file, 'r', encoding='utf-8') as f:
+                    details_data = json.load(f)
+                logger.info("Loaded %d existing detail records for %s", len(details_data), manufacturer['name'])
+            except Exception as e:
+                logger.warning("Could not load details JSON: %s", e)
+                details_data = []
+        
+        done_urls = {r.get("listing_url") for r in details_data if r.get("listing_url")}
+        
+        # Backfill from HTML (HTML exists but JSON not saved)
+        backfilled = 0
+        for idx, listing in enumerate(listings, 1):
+            listing_url = listing.get("listing_url")
+            if not listing_url or listing_url in done_urls:
+                continue
+            listing_id = self._extract_listing_id(listing_url)
+            html_filename = f"listing_{listing_id}.html" if listing_id else f"listing_{idx:06d}.html"
+            path = output_dir / html_filename
+            if not path.exists():
+                continue
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    html = f.read()
+            except Exception as e:
+                logger.warning("Backfill: could not read %s: %s", path.name, e)
+                continue
+            detail_rec = self._extract_detail_fields(html, listing_url, listing)
+            details_data.append(detail_rec)
+            done_urls.add(listing_url)
+            backfilled += 1
+        if backfilled:
+            with open(details_file, "w", encoding="utf-8") as f:
+                json.dump(details_data, f, indent=2, ensure_ascii=False)
+            logger.info("Backfill: added %d detail records from HTML -> JSON for %s", backfilled, manufacturer['name'])
+        
+        if done_urls:
+            logger.info("Skipping %d already-scraped listings for %s", len(done_urls), manufacturer['name'])
+        
+        # Initialize result dict early (needed for early return path)
         result = {
             "manufacturer": manufacturer['name'],
             "manufacturer_id": manufacturer_id,
             "date": date_str,
             "listings_scraped": 0,
+            "listings_skipped": 0,
             "html_files": [],
-            "details_data": [],
+            "details_data": details_data,
             "scrape_duration": 0,
             "errors": []
         }
         
+        if len(done_urls) >= len(listings):
+            logger.info("All %d listings for %s already scraped; nothing to do.", len(listings), manufacturer['name'])
+            result["listings_skipped"] = len(done_urls)
+            result["scrape_duration"] = time.time() - start_time
+            return result
+        
+        logger.info("=" * 60)
+        logger.info("Scraping detail pages for %s", manufacturer['name'])
+        logger.info("Total listings to process: %d", len(listings))
+        logger.info("Skip-if-exists + backfill: same date re-runs safe; no overwrite/delete.")
+        logger.info("=" * 60)
+        
         driver = None
         try:
             driver = self._setup_driver()
-            
+            scraped_this_run = 0
             for idx, listing in enumerate(listings, 1):
                 listing_url = listing.get('listing_url')
                 if not listing_url:
-                    logger.warning(f"Listing {idx} missing URL, skipping")
+                    logger.warning("Listing %d missing URL, skipping", idx)
+                    continue
+                if listing_url in done_urls:
+                    result["listings_skipped"] += 1
                     continue
                 
                 logger.info("=" * 60)
-                logger.info(f"Scraping detail {idx}/{len(listings)}: {listing.get('aircraft_model', 'Unknown')}")
-                logger.info(f"URL: {listing_url}")
+                logger.info("Scraping detail %d/%d: %s", idx, len(listings), listing.get('aircraft_model', 'Unknown'))
+                logger.info("URL: %s", listing_url)
                 logger.info("=" * 60)
                 
-                # Human-like: "thinking" pause before each listing (except first) - matches Controller
-                if idx > 1:
-                    pre_pause = random.uniform(1.5, 4.0)
-                    logger.debug(f"Pre-listing thinking pause: {pre_pause:.2f} seconds")
-                    time.sleep(pre_pause)
-                
-                # Human-like delay between listings (matches Controller detail scraper)
-                if idx > 1:
+                if scraped_this_run > 0:
+                    time.sleep(random.uniform(1.5, 4.0))
+                if scraped_this_run > 0:
                     self._wait_for_rate_limit()
                 
-                # Fetch detail page
                 html_content = self._fetch_page(driver, listing_url)
-                
                 if not html_content:
-                    logger.error(f"Failed to fetch detail page for listing {idx}")
                     result["errors"].append(f"Failed to fetch: {listing_url}")
                     continue
                 
-                # Extract listing ID from URL
                 listing_id = self._extract_listing_id(listing_url)
-                
-                # Save HTML
                 html_filename = f"listing_{listing_id}.html" if listing_id else f"listing_{idx:06d}.html"
                 html_filepath = output_dir / html_filename
                 with open(html_filepath, 'wb') as f:
                     f.write(html_content.encode('utf-8'))
                 result["html_files"].append(str(html_filepath))
-                logger.info(f"Saved HTML: {html_filename}")
+                logger.info("Saved HTML: %s", html_filename)
                 
-                # Extract detail fields (reuse extraction logic from regular detail scraper)
                 detail_data = self._extract_detail_fields(html_content, listing_url, listing)
-                
-                # Save to results
                 result["details_data"].append(detail_data)
                 result["listings_scraped"] += 1
+                scraped_this_run += 1
+                done_urls.add(listing_url)
                 
-                # Save incremental JSON
-                details_file = output_dir / "details_metadata.json"
                 with open(details_file, 'w', encoding='utf-8') as f:
                     json.dump(result["details_data"], f, indent=2, ensure_ascii=False)
-                logger.info(f"Incremental save: {len(result['details_data'])} details saved")
+                logger.info("Incremental save: %d details saved", len(result["details_data"]))
                 
         except Exception as e:
             logger.error(f"Scraper failed: {e}", exc_info=True)
@@ -739,10 +919,11 @@ class AircraftExchangeManufacturerDetailScraperUndetected:
             logger.info(f"Final save: {len(result['details_data'])} details saved")
         
         logger.info("=" * 60)
-        logger.info(f"Scrape Summary for {manufacturer['name']}")
-        logger.info(f"Listings scraped: {result['listings_scraped']}/{len(listings)}")
-        logger.info(f"HTML files saved: {len(result['html_files'])}")
-        logger.info(f"Scrape duration: {result['scrape_duration']:.2f} seconds")
+        logger.info("Scrape Summary for %s", manufacturer['name'])
+        logger.info("Listings scraped this run: %d", result["listings_scraped"])
+        logger.info("Listings skipped (already scraped): %d", result.get("listings_skipped", 0))
+        logger.info("HTML files saved this run: %d", len(result["html_files"]))
+        logger.info("Scrape duration: %.2f seconds", result["scrape_duration"])
         logger.info("=" * 60)
         
         return result

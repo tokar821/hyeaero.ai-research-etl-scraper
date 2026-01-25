@@ -6,15 +6,16 @@ ETL pipeline for data ingestion and normalization from aircraft market data sour
 
 This module handles:
 - Scraping data from sources (Controller, AircraftExchange, FAA)
-- Raw data storage in Akamai Object Storage
+- Raw data storage in local file system
 - Data normalization
-- Loading into downstream systems
+- Loading into downstream systems (PostgreSQL)
 
 ## Architecture
 
 - **Config Module**: Central configuration loader with environment variable support
-- **Storage Module**: Akamai Object Storage client wrapper (S3-compatible API)
 - **Utils Module**: Logging and other utilities
+- **Scrapers Module**: Web scrapers for aircraft market data
+- **Database Module**: PostgreSQL database operations (future)
 
 ## Setup
 
@@ -25,7 +26,7 @@ This module handles:
 
 ### 🔑 **First Time Setup? Get Your Akamai Credentials**
 
-**👉 See [AKAMAI_SETUP_GUIDE.md](./AKAMAI_SETUP_GUIDE.md) for a complete step-by-step guide on how to:**
+**👉 See [AKAMAI_SETUP_GUIDE.md](./docs/AKAMAI_SETUP_GUIDE.md) for a complete step-by-step guide on how to:**
 - Create Access Keys and Secret Keys
 - Find your Endpoint URL
 - Get your Bucket Name and Region
@@ -52,36 +53,45 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-4. Configure environment:
+4. Configure environment (optional):
 ```bash
-# Copy the example env file
-cp .env.example .env
+# Copy the example env file if it exists
+# cp env/.env.example .env
 
-# Edit .env with your actual credentials
-# See AKAMAI_SETUP_GUIDE.md for detailed instructions
+# Edit .env with your settings
 ```
 
 ### Environment Variables
 
-Required environment variables (see `.env.example`):
+Optional environment variables (see `env/.env.example` if exists):
 
-- `ENVIRONMENT`: `dev`, `prod`, or `local` (local enables dry-run mode)
+- `ENVIRONMENT`: `dev`, `prod`, or `local` (defaults to `local`)
 - `DRY_RUN`: `true` or `false` (local defaults to true)
 - `LOG_LEVEL`: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-- `AKAMAI_ACCESS_KEY`: Your Akamai access key
-- `AKAMAI_SECRET_KEY`: Your Akamai secret key
-- `AKAMAI_ENDPOINT`: Akamai endpoint URL
-- `AKAMAI_BUCKET_NAME`: Bucket name for storage
-- `AKAMAI_REGION`: Optional region (defaults to us-east-1)
 
 ## Usage
+
+### Running Scrapers
+
+```bash
+# Controller index scraper
+python runners/run_controller_scraper.py
+
+# Controller detail scraper
+python runners/run_controller_detail_scraper.py --max-listings 10
+
+# AircraftExchange all modules
+python runners/run_aircraftexchange_scraper.py --all
+
+# FAA scraper
+python runners/run_faa_scraper.py
+```
 
 ### Basic Example
 
 ```python
 from config import get_config
-from storage import AkamaiStorageClient
-from utils import setup_logging, get_logger
+from utils.logger import setup_logging, get_logger
 
 # Setup logging
 setup_logging()
@@ -90,50 +100,14 @@ logger = get_logger(__name__)
 # Load config
 config = get_config()
 logger.info(f"Environment: {config.environment}, Dry-run: {config.is_dry_run()}")
-
-# Initialize storage client
-storage = AkamaiStorageClient()
-
-# Upload raw data
-data = b'{"aircraft": "Phenom 300", "year": 2017}'
-storage.upload_raw_data(
-    source="controller",
-    filename="listing_12345.json",
-    data=data,
-    content_type="application/json"
-)
-
-# Upload snapshot
-storage.upload_snapshot(
-    entity="aircraft",
-    filename="phenom300_2017.json",
-    data=data,
-    content_type="application/json"
-)
 ```
 
-### Storage Path Conventions
+### Data Storage
 
-- **Raw data**: `raw/{source}/{YYYY-MM-DD}/{filename}`
-  - Example: `raw/controller/2024-01-15/listing_12345.json`
-
-- **Snapshots**: `snapshots/{entity}/{YYYY-MM-DD}/{filename}`
-  - Example: `snapshots/aircraft/2024-01-15/phenom300_2017.json`
-
-## Dry-Run Mode
-
-When `ENVIRONMENT=local` or `DRY_RUN=true`, the storage client operates in dry-run mode:
-- No actual uploads to storage
-- All operations are logged as `[DRY-RUN]`
-- Useful for testing without affecting production data
-
-## Error Handling
-
-All storage operations raise explicit exceptions:
-- `StorageError`: Base exception for storage operations
-- `StorageConnectionError`: Connection/authentication failures
-- `StorageUploadError`: Upload failures
-- `StorageDownloadError`: Download failures
+All scraped data is stored locally in the `store/` directory:
+- **Raw data**: `store/raw/{source}/{YYYY-MM-DD}/`
+  - Example: `store/raw/controller/2024-01-15/index/`
+  - Example: `store/raw/controller/2024-01-15/details/`
 
 ## Logging
 
@@ -141,11 +115,12 @@ Logging includes:
 - Timestamps (YYYY-MM-DD HH:MM:SS)
 - Module names
 - Log levels
+- Log files saved to `logs/` directory
 
 Example log output:
 ```
-2024-01-15 14:30:45 | storage.akamai_client | INFO | Storage client initialized successfully for bucket: hyeaero-data
-2024-01-15 14:30:46 | storage.akamai_client | INFO | Successfully uploaded raw data: raw/controller/2024-01-15/listing_12345.json
+2024-01-15 14:30:45 | scrapers.controller_scraper_undetected | INFO | Starting Controller.com scraper
+2024-01-15 14:30:46 | scrapers.controller_scraper_undetected | INFO | Scraped page 1/182
 ```
 
 ## Development
@@ -154,16 +129,47 @@ Example log output:
 
 ```
 etl-pipeline/
-├── config/
+├── config/              # Configuration management
 │   ├── __init__.py
 │   └── config_loader.py
-├── storage/
+├── utils/               # Utility functions
 │   ├── __init__.py
-│   └── akamai_client.py
-├── utils/
+│   ├── logger.py
+│   └── chrome_utils.py
+├── scrapers/            # Scraper modules
 │   ├── __init__.py
-│   └── logger.py
-├── .env.example
+│   ├── controller_*.py
+│   ├── aircraftexchange_*.py
+│   └── faa_scraper.py
+├── runners/             # Runner scripts
+│   ├── __init__.py
+│   ├── run_controller_scraper.py
+│   ├── run_controller_detail_scraper.py
+│   ├── run_aircraftexchange_scraper.py
+│   └── run_faa_scraper.py
+├── database/            # Database operations (PostgreSQL)
+│   └── __init__.py
+├── store/               # Local raw data storage
+│   └── raw/
+│       ├── controller/
+│       └── aircraftexchange/
+├── logs/                # Log files
+│   ├── controller_log.txt
+│   ├── aircraftexchange_log.txt
+│   └── faa_log.txt
+├── docs/                # Documentation
+│   ├── SCRAPER_RE-RUN_BEHAVIOR.md
+│   ├── CONTROLLER_DETAIL_PARSING_PATTERN.md
+│   ├── QUICK_START.md
+│   ├── TEST_COMMANDS.md
+│   └── REFACTORING_PLAN.md
+├── scripts/             # Utility and test scripts
+│   ├── __init__.py
+│   ├── verify_*.py
+│   ├── check_*.py
+│   └── test_*.py
+├── env/                 # Environment files
+│   └── .env.example
 ├── .gitignore
 ├── requirements.txt
 └── README.md
@@ -171,6 +177,7 @@ etl-pipeline/
 
 ## Next Steps
 
-- Implement scrapers for Controller, AircraftExchange, and FAA
-- Add data normalization pipelines
-- Implement data validation and quality checks
+- ✅ Scrapers implemented for Controller, AircraftExchange, and FAA
+- Add PostgreSQL database integration
+- Implement data normalization pipelines
+- Add data validation and quality checks

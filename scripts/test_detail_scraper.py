@@ -1,8 +1,13 @@
 """Test script for Controller detail scraper."""
 
+import sys
+from pathlib import Path
+
+# Add parent directory to path so imports work from scripts/ directory
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from scrapers.controller_detail_scraper_undetected import ControllerDetailScraperUndetected
 from utils.logger import setup_logging, get_logger
-from pathlib import Path
 import json
 
 

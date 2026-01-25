@@ -1,6 +1,6 @@
 """Central configuration loader for ETL pipeline.
 
-Handles loading of Akamai credentials, bucket configuration, and environment settings.
+Handles loading of environment settings.
 No hardcoded secrets - all values loaded from environment variables.
 """
 
@@ -26,20 +26,9 @@ class Environment(str, Enum):
 
 
 @dataclass
-class AkamaiConfig:
-    """Akamai Object Storage configuration."""
-    access_key: str
-    secret_key: str
-    endpoint: str
-    bucket_name: str
-    region: Optional[str] = None
-
-
-@dataclass
 class Config:
     """Central configuration for ETL pipeline."""
     environment: Environment
-    akamai: AkamaiConfig
     dry_run: bool = False
     log_level: str = "INFO"
 
@@ -63,36 +52,11 @@ class Config:
         # Dry-run mode (local environment defaults to True)
         dry_run = os.getenv("DRY_RUN", str(environment == Environment.LOCAL)).lower() == "true"
 
-        # Akamai credentials
-        access_key = os.getenv("AKAMAI_ACCESS_KEY")
-        secret_key = os.getenv("AKAMAI_SECRET_KEY")
-        endpoint = os.getenv("AKAMAI_ENDPOINT")
-        bucket_name = os.getenv("AKAMAI_BUCKET_NAME")
-        region = os.getenv("AKAMAI_REGION")
-
-        if not access_key:
-            raise ValueError("AKAMAI_ACCESS_KEY environment variable is required")
-        if not secret_key:
-            raise ValueError("AKAMAI_SECRET_KEY environment variable is required")
-        if not endpoint:
-            raise ValueError("AKAMAI_ENDPOINT environment variable is required")
-        if not bucket_name:
-            raise ValueError("AKAMAI_BUCKET_NAME environment variable is required")
-
-        akamai = AkamaiConfig(
-            access_key=access_key,
-            secret_key=secret_key,
-            endpoint=endpoint,
-            bucket_name=bucket_name,
-            region=region,
-        )
-
         # Log level
         log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
         return cls(
             environment=environment,
-            akamai=akamai,
             dry_run=dry_run,
             log_level=log_level,
         )

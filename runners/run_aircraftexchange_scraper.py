@@ -13,6 +13,10 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
+
+# Add parent directory to path so imports work from runners/ directory
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from scrapers.aircraftexchange_index_scraper_undetected import AircraftExchangeIndexScraperUndetected
 from scrapers.aircraftexchange_manufacturer_scraper_undetected import AircraftExchangeManufacturerScraperUndetected
 from scrapers.aircraftexchange_manufacturer_detail_scraper_undetected import AircraftExchangeManufacturerDetailScraperUndetected
@@ -53,7 +57,7 @@ class FilteredStderr:
         return getattr(self.original_stderr, name)
 
 
-def run_index_scraper(headless: bool = False, rate_limit: float = 6.0, max_pages: int = None):
+def run_index_scraper(headless: bool = False, rate_limit: float = 6.0, max_pages: int = None, date=None):
     """Run AircraftExchange index scraper."""
     logger = get_logger(__name__)
     logger.info("=" * 60)
@@ -62,7 +66,7 @@ def run_index_scraper(headless: bool = False, rate_limit: float = 6.0, max_pages
     logger.info("=" * 60)
     
     scraper = AircraftExchangeIndexScraperUndetected(headless=headless, rate_limit=rate_limit)
-    result = scraper.scrape_listings(date=datetime.now(), max_pages=max_pages)
+    result = scraper.scrape_listings(date=date or datetime.now(), max_pages=max_pages)
     
     logger.info("=" * 60)
     logger.info("INDEX Scraper Completed!")
@@ -80,7 +84,7 @@ def run_index_scraper(headless: bool = False, rate_limit: float = 6.0, max_pages
     return result
 
 
-def run_manufacturer_scraper(headless: bool = False, rate_limit: float = 6.0):
+def run_manufacturer_scraper(headless: bool = False, rate_limit: float = 6.0, date=None):
     """Run AircraftExchange manufacturer scraper."""
     logger = get_logger(__name__)
     logger.info("=" * 60)
@@ -88,12 +92,13 @@ def run_manufacturer_scraper(headless: bool = False, rate_limit: float = 6.0):
     logger.info("Scraping: https://aircraftexchange.com/aircraft-manufacturers")
     logger.info("=" * 60)
     
-    start_time = datetime.now()
+    run_date = date or datetime.now()
+    start_wall = datetime.now()
     scraper = AircraftExchangeManufacturerScraperUndetected(headless=headless, rate_limit=rate_limit)
-    manufacturers = scraper.scrape_manufacturers_list(date=start_time)
+    manufacturers = scraper.scrape_manufacturers_list(date=run_date)
     
-    duration = (datetime.now() - start_time).total_seconds()
-    date_str = start_time.strftime("%Y-%m-%d")
+    duration = (datetime.now() - start_wall).total_seconds()
+    date_str = run_date.strftime("%Y-%m-%d")
     
     logger.info("=" * 60)
     logger.info("MANUFACTURER Scraper Completed!")
@@ -116,7 +121,8 @@ def run_manufacturer_detail_scraper(
     rate_limit: float = 6.0,
     max_manufacturers: int = None,
     max_pages_per_manufacturer: int = None,
-    max_listings_per_manufacturer: int = None
+    max_listings_per_manufacturer: int = None,
+    date=None,
 ):
     """Run AircraftExchange manufacturer detail scraper."""
     logger = get_logger(__name__)
@@ -127,7 +133,7 @@ def run_manufacturer_detail_scraper(
     
     scraper = AircraftExchangeManufacturerDetailScraperUndetected(headless=headless, rate_limit=rate_limit)
     result = scraper.scrape_all_manufacturer_details(
-        date=datetime.now(),
+        date=date or datetime.now(),
         max_manufacturers=max_manufacturers,
         max_pages_per_manufacturer=max_pages_per_manufacturer,
         max_listings_per_manufacturer=max_listings_per_manufacturer
@@ -149,7 +155,7 @@ def run_manufacturer_detail_scraper(
     return result
 
 
-def run_detail_scraper(headless: bool = False, rate_limit: float = 6.0, max_listings: int = None):
+def run_detail_scraper(headless: bool = False, rate_limit: float = 6.0, max_listings: int = None, date=None, start_from: int = 1):
     """Run AircraftExchange detail scraper (from index listings)."""
     logger = get_logger(__name__)
     logger.info("=" * 60)
@@ -158,7 +164,11 @@ def run_detail_scraper(headless: bool = False, rate_limit: float = 6.0, max_list
     logger.info("=" * 60)
     
     scraper = AircraftExchangeDetailScraperUndetected(headless=headless, rate_limit=rate_limit)
-    result = scraper.scrape_details(date=datetime.now(), max_listings=max_listings)
+    result = scraper.scrape_details(
+        date=date or datetime.now(),
+        max_listings=max_listings,
+        start_from=start_from,
+    )
     
     logger.info("=" * 60)
     logger.info("DETAIL Scraper Completed!")
@@ -277,6 +287,18 @@ Modules (run one or more with --index, --manufacturer, --manufacturer-detail, --
         default=None,
         help='Maximum detail pages to scrape (detail scraper)'
     )
+    parser.add_argument(
+        '--date',
+        type=str,
+        default=None,
+        help='Use data for YYYY-MM-DD (default: today). Index/details paths use this date.'
+    )
+    parser.add_argument(
+        '--start-from',
+        type=int,
+        default=1,
+        help='Detail scraper: 1-based index to resume from (e.g. 73 = skip 1..72, scrape from 73). Default: 1.'
+    )
     
     args = parser.parse_args()
     
@@ -290,7 +312,7 @@ Modules (run one or more with --index, --manufacturer, --manufacturer-detail, --
     sys.stderr = FilteredStderr(original_stderr)
 
     # Setup logging with file output
-    log_dir = Path(__file__).parent / "logs"
+    log_dir = Path(__file__).parent.parent / "logs"
     log_dir.mkdir(exist_ok=True)
     log_file = log_dir / "aircraftexchange_log.txt"
 
@@ -298,6 +320,17 @@ Modules (run one or more with --index, --manufacturer, --manufacturer-detail, --
     logger = get_logger(__name__)
 
     try:
+        date_arg = None
+        if args.date:
+            try:
+                date_arg = datetime.strptime(args.date, "%Y-%m-%d")
+            except ValueError:
+                logger.error("Invalid --date %s; use YYYY-MM-DD", args.date)
+                raise SystemExit(1)
+            logger.info("Using date: %s", args.date)
+        if args.start_from and args.start_from > 1 and (args.all or args.detail):
+            logger.info("Detail scraper: resuming from listing %s", args.start_from)
+        
         logger.info("=" * 60)
         logger.info("AircraftExchange Scraper - Starting")
         logger.info(f"Rate limit: {args.rate_limit} seconds")
@@ -307,20 +340,21 @@ Modules (run one or more with --index, --manufacturer, --manufacturer-detail, --
         
         results = {}
         
-        # Run selected modules
         if args.all or args.index:
             logger.info("\n")
             results['index'] = run_index_scraper(
                 headless=args.headless,
                 rate_limit=args.rate_limit,
-                max_pages=args.max_pages
+                max_pages=args.max_pages,
+                date=date_arg,
             )
         
         if args.all or args.manufacturer:
             logger.info("\n")
             results['manufacturer'] = run_manufacturer_scraper(
                 headless=args.headless,
-                rate_limit=args.rate_limit
+                rate_limit=args.rate_limit,
+                date=date_arg,
             )
         
         if args.all or args.manufacturer_detail:
@@ -330,7 +364,8 @@ Modules (run one or more with --index, --manufacturer, --manufacturer-detail, --
                 rate_limit=args.rate_limit,
                 max_manufacturers=args.max_manufacturers,
                 max_pages_per_manufacturer=args.max_pages_per_manufacturer,
-                max_listings_per_manufacturer=args.max_listings_per_manufacturer
+                max_listings_per_manufacturer=args.max_listings_per_manufacturer,
+                date=date_arg,
             )
         
         if args.all or args.detail:
@@ -338,7 +373,9 @@ Modules (run one or more with --index, --manufacturer, --manufacturer-detail, --
             results['detail'] = run_detail_scraper(
                 headless=args.headless,
                 rate_limit=args.rate_limit,
-                max_listings=args.max_listings
+                max_listings=args.max_listings,
+                date=date_arg,
+                start_from=args.start_from or 1,
             )
         
         # Final summary

@@ -8,6 +8,7 @@ Install: pip install undetected-chromedriver selenium beautifulsoup4
 
 import hashlib
 import json
+import os
 import random
 import time
 from datetime import datetime
@@ -60,14 +61,54 @@ class ControllerDetailScraperUndetected:
     
     BASE_URL = "https://www.controller.com"
     
-    def __init__(self, storage_base_path: Optional[Path] = None, rate_limit: float = 6.0, headless: bool = False):
+    DEFAULT_TIMEZONES = ["America/New_York", "Europe/London", "Asia/Tokyo"]
+
+    def _cleanup_chrome_locks(self, profile_dir: Path):
+        """Clean up Chrome lock files from profile directory to allow new instance.
+        Chrome creates SingletonLock, SingletonSocket, lockfile when using --user-data-dir.
+        If previous instance didn't close cleanly, these prevent new instances.
+        """
+        lock_files = [
+            profile_dir / "SingletonLock",
+            profile_dir / "SingletonSocket",
+            profile_dir / "lockfile",
+            profile_dir / "Default" / "SingletonLock",
+            profile_dir / "Default" / "SingletonSocket",
+            profile_dir / "Default" / "lockfile",
+        ]
+        cleaned = 0
+        for lock_file in lock_files:
+            try:
+                if lock_file.exists():
+                    lock_file.unlink()
+                    cleaned += 1
+            except (OSError, PermissionError) as e:
+                logger.debug("Could not remove lock file %s: %s", lock_file.name, e)
+        if cleaned:
+            logger.debug("Cleaned %d Chrome lock file(s) from %s", cleaned, profile_dir.name)
+        # Small delay to ensure filesystem sync
+        time.sleep(0.5)
+
+    def __init__(
+        self,
+        storage_base_path: Optional[Path] = None,
+        rate_limit: float = 6.0,
+        headless: bool = False,
+        profiles_dir: Optional[Path] = None,
+        num_profiles: int = 0,
+        proxy: Optional[str] = None,
+        timezones: Optional[List[str]] = None,
+    ):
         """Initialize undetected-chromedriver detail scraper.
         
         Args:
             storage_base_path: Base path for local storage. If None, uses './store'.
-            rate_limit: Base seconds to wait between requests (will be randomized). Default: 6.0 seconds.
-                        Actual delays will be 6-12 seconds to mimic human reading/thinking time.
-            headless: Run browser in headless mode. Default: False (non-headless for better evasion).
+            rate_limit: Base seconds to wait between requests (will be randomized).
+            headless: Run browser in headless mode. Default: False.
+            profiles_dir: Dir for Chrome user-data-dir profiles (multi-profile rotation). If None, no profiles.
+            num_profiles: Number of profiles to rotate (e.g. 3 = different browser ID each cooldown). 0 = disable.
+            proxy: Optional proxy 'host:port' (different IP). No auth; use IP whitelist or proxy provider.
+            timezones: IANA timezone IDs per profile (e.g. America/New_York). Default: NY, London, Tokyo.
         """
         if not UNDETECTED_AVAILABLE:
             raise ControllerDetailScraperUndetectedError(
@@ -85,29 +126,88 @@ class ControllerDetailScraperUndetected:
         self.rate_limit = rate_limit
         self.headless = headless
         self.visited_urls = set()
+        self.profiles_dir = Path(profiles_dir) if profiles_dir else None
+        self.num_profiles = max(0, int(num_profiles))
+        self.proxy = (proxy or "").strip() or None
+        self.timezones = timezones if timezones else list(self.DEFAULT_TIMEZONES)
     
-    def _setup_driver(self):
-        """Setup undetected Chrome driver with human-like settings."""
-        options = uc.ChromeOptions()
-        
-        if self.headless:
-            options.add_argument('--headless=new')
-        
-        # Human-like browser window size (not maximized, more natural)
-        window_width = random.randint(1366, 1920)
-        window_height = random.randint(768, 1080)
-        options.add_argument(f'--window-size={window_width},{window_height}')
-        
-        options.add_argument('--disable-blink-features=AutomationControlled')
-        options.add_argument('--disable-dev-shm-usage')
-        
-        options.add_argument('--lang=en-US')
-        options.add_argument('--disable-infobars')
-        
+    def _setup_driver(self, profile_index: int = 0):
+        """Setup undetected Chrome driver with human-like settings.
+        Explicitly enables cookies and JavaScript. Optional: multi-profile (browser ID),
+        proxy (IP), timezone override per profile to reduce CAPTCHA triggers.
+        """
         version_main = get_chrome_version()
         if version_main:
-            logger.info(f"Detected Chrome version: {version_main}")
-        driver = uc.Chrome(options=options, version_main=version_main)
+            logger.info("Detected Chrome version: %s", version_main)
+        
+        # Multi-profile: use a *fresh* session dir per launch to avoid "chrome not reachable".
+        # Reusing the same user-data-dir often causes connection failures (locks, stale state).
+        # We still rotate profile_0/1/2 for cooldown; each launch uses profile_X/session_<ts>.
+        profile_dir = None
+        if self.profiles_dir and self.num_profiles > 0:
+            base = self.profiles_dir / f"profile_{profile_index % self.num_profiles}"
+            base.mkdir(parents=True, exist_ok=True)
+            session_name = f"session_{int(time.time())}_{random.randint(1000, 9999)}"
+            profile_dir = base / session_name
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("Using Chrome profile: %s / %s (browser ID %d)", base.name, session_name, profile_index % self.num_profiles)
+        
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            options = uc.ChromeOptions()
+            
+            if self.headless:
+                options.add_argument('--headless=new')
+            
+            if profile_dir:
+                options.add_argument(f'--user-data-dir={profile_dir.resolve()}')
+            
+            # Proxy: different IP (e.g. rotating residential). Format: host:port (no auth).
+            if self.proxy:
+                options.add_argument(f'--proxy-server={self.proxy}')
+                logger.info("Using proxy: %s", self.proxy)
+            
+            # Human-like browser window size (not maximized, more natural)
+            window_width = random.randint(1366, 1920)
+            window_height = random.randint(768, 1080)
+            options.add_argument(f'--window-size={window_width},{window_height}')
+            
+            options.add_argument('--disable-blink-features=AutomationControlled')
+            options.add_argument('--disable-dev-shm-usage')
+            
+            options.add_argument('--lang=en-US')
+            options.add_argument('--disable-infobars')
+            
+            # Explicitly allow cookies and JavaScript (hCaptcha cites these as bot triggers)
+            options.add_experimental_option('prefs', {
+                'profile.default_content_setting_values.cookies': 1,
+                'profile.default_content_setting_values.javascript': 1,
+                'profile.block_third_party_cookies': 0,
+            })
+            
+            try:
+                driver = uc.Chrome(options=options, version_main=version_main)
+                break
+            except Exception as e:
+                if ("cannot connect to chrome" in str(e).lower() or 
+                    "session not created" in str(e).lower() or
+                    "chrome not reachable" in str(e).lower()):
+                    if attempt < max_retries and profile_dir:
+                        logger.warning("Chrome connection failed (attempt %d/%d), cleaning locks and retrying...", attempt, max_retries)
+                        self._cleanup_chrome_locks(profile_dir)
+                        time.sleep(2.0 * attempt)  # Exponential backoff
+                        continue
+                raise
+        
+        # Timezone override per profile (different “location”)
+        tz_list = self.timezones or self.DEFAULT_TIMEZONES
+        if tz_list:
+            tz_id = tz_list[profile_index % len(tz_list)]
+            try:
+                driver.execute_cdp_cmd('Emulation.setTimezoneOverride', {'timezoneId': tz_id})
+                logger.info("Timezone override: %s", tz_id)
+            except Exception as e:
+                logger.debug("Timezone override failed (continuing): %s", e)
         
         # Set window size (don't maximize - humans don't always maximize)
         driver.set_window_size(window_width, window_height)
@@ -119,19 +219,43 @@ class ControllerDetailScraperUndetected:
                 y_offset = random.randint(0, 100)
                 driver.set_window_position(x_offset, y_offset)
             except Exception:
-                pass  # Continue if position setting fails
+                pass
         
         return driver
+    
+    WARMUP_URL = "https://www.controller.com/listings/search"
+    
+    def _warmup_visit(self, driver):
+        """Visit main site first to establish session/cookies. Reduces 'super-human' bot signal."""
+        try:
+            logger.info("Warm-up: visiting %s to establish session (cookies, JS)", self.WARMUP_URL)
+            time.sleep(random.uniform(1.0, 2.5))
+            driver.get(self.WARMUP_URL)
+            try:
+                wait = WebDriverWait(driver, 30)
+                wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+            except TimeoutException:
+                pass
+            initial = random.uniform(3, 6)
+            time.sleep(initial)
+            self._simulate_human_behavior(driver)
+            rest = random.uniform(5, 15)
+            logger.info("Warm-up: resting %.1f s (human-like)", rest)
+            time.sleep(rest)
+            logger.info("Warm-up complete")
+        except Exception as e:
+            logger.warning("Warm-up visit failed (continuing anyway): %s", e)
     
     def _wait_for_rate_limit(self):
         """Wait for rate limit delay with human-like randomization.
         Priority: avoid bot detection over speed. Slower = more human-like.
+        Increased vs earlier to reduce 'super-human speed' hCaptcha trigger.
         """
         base_delay = self.rate_limit
-        reading_time = random.uniform(4.0, 8.0)  # 4-8 seconds "reading" per listing
-        jitter = random.uniform(1.0, 1.4)
+        reading_time = random.uniform(6.0, 12.0)  # 6-12 s "reading" per listing
+        jitter = random.uniform(1.0, 1.3)
         delay = base_delay + reading_time * jitter
-        logger.debug(f"Human-like delay: {delay:.2f} seconds (mimicking reading time)")
+        logger.debug("Human-like delay: %.2f seconds (mimicking reading time)", delay)
         time.sleep(delay)
     
     def _simulate_human_behavior(self, driver):
@@ -241,8 +365,8 @@ class ControllerDetailScraperUndetected:
             try:
                 logger.info(f"Navigating to: {full_url} (attempt {attempt}/{retries})")
                 
-                # Human-like: brief pause before navigation
-                time.sleep(random.uniform(1.0, 2.5))
+                # Human-like: brief pause before navigation (reduce super-human speed)
+                time.sleep(random.uniform(1.5, 3.5))
                 
                 driver.get(full_url)
                 
@@ -266,14 +390,14 @@ class ControllerDetailScraperUndetected:
                 except TimeoutException:
                     logger.warning("Timeout waiting for page content, continuing anyway")
                 
-                # Human-like: wait for page to fully render
-                initial_wait = random.uniform(4, 8)
-                logger.debug(f"Initial page load wait: {initial_wait:.2f} seconds (human-like)")
+                # Human-like: wait for page to fully render (reduce super-human speed)
+                initial_wait = random.uniform(5, 10)
+                logger.debug("Initial page load wait: %.2f seconds (human-like)", initial_wait)
                 time.sleep(initial_wait)
                 
                 self._simulate_human_behavior(driver)
                 
-                time.sleep(random.uniform(3, 6))
+                time.sleep(random.uniform(4, 8))
                 
                 # Get page content
                 html_content = driver.page_source
@@ -1139,11 +1263,23 @@ class ControllerDetailScraperUndetected:
         date: Optional[datetime] = None,
         max_listings: Optional[int] = None,
         start_from: int = 1,
+        cooldown_every: int = 0,
+        cooldown_min_minutes: float = 10.0,
+        cooldown_max_minutes: float = 30.0,
+        cooldown_restart_browser: bool = True,
     ) -> Dict:
         """Scrape detail pages for listing URLs.
-        start_from: 1-based index to resume from (e.g. 373 = skip 1..372, scrape 373..).
-        Loads or backfills detail_data for 1..(start_from-1), then scrapes from start_from.
-        Saves details_metadata.json after each scraped page.
+
+        Skip-if-exists: Always loads existing details_metadata.json. Skips fetching for any
+        listing whose listing_url already has a detail record. Re-running is safe; no
+        duplicates, no need to track --start-from.
+
+        start_from: Unused when skip-if-exists. Kept for API compat.
+        max_listings: Max *new* detail pages to scrape this run. None = no limit.
+
+        Cooldown (CAPTCHA mitigation): after every cooldown_every successfully scraped
+        listings, pause cooldown_min_minutes--cooldown_max_minutes (random), then
+        optionally restart browser (new session). Set cooldown_every=0 to disable.
         """
         if date is None:
             date = datetime.now()
@@ -1157,6 +1293,7 @@ class ControllerDetailScraperUndetected:
         logger.info("Controller.com Aircraft Listing Detail Scraper (Undetected Chrome)")
         logger.info("Date: %s", date_str)
         logger.info("Output directory: %s", output_dir)
+        logger.info("Skip-if-exists: skip already-scraped listings; re-runs are safe.")
         logger.info("=" * 60)
         
         if listing_urls is None:
@@ -1173,42 +1310,64 @@ class ControllerDetailScraperUndetected:
         detail_data: List[Dict] = []
         details_file = output_dir / "details_metadata.json"
         
-        if start_from > 1:
-            if details_file.exists():
-                try:
-                    with open(details_file, 'r', encoding='utf-8') as f:
-                        detail_data = json.load(f)
-                    # Keep only first start_from - 1 to avoid duplicates when appending
-                    if len(detail_data) > start_from - 1:
-                        detail_data = detail_data[: start_from - 1]
-                    logger.info(
-                        "Loaded %d existing detail records from %s",
-                        len(detail_data),
-                        details_file.name,
-                    )
-                except Exception as e:
-                    logger.warning("Could not load existing details JSON: %s", e)
-                    detail_data = []
-            if len(detail_data) < start_from - 1:
+        if details_file.exists():
+            try:
+                with open(details_file, 'r', encoding='utf-8') as f:
+                    detail_data = json.load(f)
                 logger.info(
-                    "Backfilling detail data from HTML for listings 1..%d",
-                    start_from - 1,
+                    "Loaded %d existing detail records from %s",
+                    len(detail_data),
+                    details_file.name,
                 )
-                backfilled = self._backfill_details_from_html(
-                    output_dir, listing_urls, start_from - 1
-                )
-                detail_data = backfilled
-                self._save_details_json(output_dir, detail_data)
+            except Exception as e:
+                logger.warning("Could not load existing details JSON: %s", e)
+                detail_data = []
         
-        urls_to_scrape = listing_urls[(start_from - 1) :]
+        done_urls = {r.get("listing_url") for r in detail_data if r.get("listing_url")}
+        
+        # Backfill from HTML: we have listing_*.html but no JSON record (e.g. crash before save)
+        backfilled = 0
+        for listing_url in listing_urls:
+            if listing_url in done_urls:
+                continue
+            lid = self._extract_listing_id(listing_url)
+            if not lid:
+                continue
+            path = output_dir / f"listing_{lid}.html"
+            if not path.exists():
+                continue
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    html = f.read()
+            except Exception as e:
+                logger.warning("Backfill: could not read %s: %s", path.name, e)
+                continue
+            d = self._extract_detail_fields(html, listing_url)
+            detail_data.append(d)
+            done_urls.add(listing_url)
+            backfilled += 1
+        if backfilled:
+            self._save_details_json(output_dir, detail_data)
+            logger.info("Backfill: added %d detail records from HTML -> JSON", backfilled)
+        
+        if done_urls:
+            logger.info("Skipping %d already-scraped listings", len(done_urls))
         if max_listings is not None:
-            urls_to_scrape = urls_to_scrape[:max_listings]
-            logger.info("Limiting to %d listings for this run", max_listings)
+            logger.info("Limiting to %d new scrapes this run", max_listings)
+        if cooldown_every and cooldown_every > 0:
+            logger.info(
+                "Cooldown: every %d listings, rest %.1f-%.1f mins, restart browser=%s",
+                cooldown_every,
+                cooldown_min_minutes,
+                cooldown_max_minutes,
+                cooldown_restart_browser,
+            )
         
         result = {
             "date": date_str,
             "total_urls": total_listings,
             "listings_scraped": 0,
+            "listings_skipped": 0,
             "listings_failed": 0,
             "html_files": [],
             "detail_data": detail_data,
@@ -1216,19 +1375,40 @@ class ControllerDetailScraperUndetected:
             "errors": [],
         }
         
-        if not urls_to_scrape:
-            logger.info("No listings to scrape (start_from past end or max_listings=0).")
+        if len(done_urls) >= total_listings:
+            logger.info("All %d listings already scraped; nothing to do.", total_listings)
             result["scrape_duration"] = time.time() - start_time
             return result
         
         try:
-            driver = self._setup_driver()
+            profile_index = 0
+            driver = self._setup_driver(profile_index)
+            self._warmup_visit(driver)
+            scraped_since_cooldown = 0
+            scraped_this_run = 0
+            driver_restart_failed = False
             try:
-                for i, listing_url in enumerate(urls_to_scrape):
-                    idx = start_from + i
+                for i, listing_url in enumerate(listing_urls):
+                    # Check if driver restart failed - stop processing new listings
+                    if driver_restart_failed:
+                        logger.warning("Stopping: driver restart failed during cooldown. Remaining listings will be skipped.")
+                        break
+                    idx = i + 1
                     try:
-                        if i > 0:
-                            pre_pause = random.uniform(1.5, 4.0)
+                        if listing_url in done_urls:
+                            result["listings_skipped"] += 1
+                            logger.debug(
+                                "Skipping listing %d/%d (already scraped): %s",
+                                idx, total_listings, listing_url,
+                            )
+                            continue
+                        
+                        if max_listings is not None and scraped_this_run >= max_listings:
+                            logger.info("Reached max_listings=%d new scrapes; stopping.", max_listings)
+                            break
+                        
+                        if scraped_this_run > 0:
+                            pre_pause = random.uniform(2.0, 5.0)
                             logger.debug("Pre-listing pause: %.2f seconds", pre_pause)
                             time.sleep(pre_pause)
                         
@@ -1239,6 +1419,12 @@ class ControllerDetailScraperUndetected:
                             listing_url,
                         )
                         self._wait_for_rate_limit()
+                        
+                        # Safety check: ensure driver is valid before fetching
+                        if driver is None:
+                            logger.error("Driver is None. Stopping scraper.")
+                            result["errors"].append("Driver became None during scraping")
+                            break
                         
                         html_content = self._fetch_page(driver, listing_url)
                         if html_content is None:
@@ -1256,6 +1442,9 @@ class ControllerDetailScraperUndetected:
                         d = self._extract_detail_fields(html_content, listing_url)
                         result["detail_data"].append(d)
                         result["listings_scraped"] += 1
+                        scraped_this_run += 1
+                        scraped_since_cooldown += 1
+                        done_urls.add(listing_url)
                         
                         self._save_details_json(output_dir, result["detail_data"])
                         logger.info(
@@ -1263,6 +1452,68 @@ class ControllerDetailScraperUndetected:
                             idx,
                             total_listings,
                         )
+                        
+                        # Cooldown: every N listings, rest 10-30 mins and optionally restart browser
+                        if (
+                            cooldown_every
+                            and cooldown_every > 0
+                            and scraped_since_cooldown >= cooldown_every
+                        ):
+                            rest_sec = random.uniform(
+                                cooldown_min_minutes * 60.0,
+                                cooldown_max_minutes * 60.0,
+                            )
+                            rest_mins = rest_sec / 60.0
+                            logger.info(
+                                "Cooldown: %d listings done this batch. Resting %.1f mins (CAPTCHA mitigation).",
+                                scraped_since_cooldown,
+                                rest_mins,
+                            )
+                            time.sleep(rest_sec)
+                            scraped_since_cooldown = 0
+                            if cooldown_restart_browser:
+                                if self.num_profiles > 0:
+                                    profile_index = (profile_index + 1) % self.num_profiles
+                                    logger.info(
+                                        "Cooldown: restarting browser (profile %d/%d, new IP/tz/browser ID).",
+                                        profile_index,
+                                        self.num_profiles,
+                                    )
+                                else:
+                                    logger.info("Cooldown: restarting browser (new session).")
+                                safe_driver_quit(driver)
+                                driver = None
+                                # Retry driver setup with exponential backoff (critical for cooldown restart)
+                                max_restart_retries = 3
+                                for restart_attempt in range(1, max_restart_retries + 1):
+                                    try:
+                                        driver = self._setup_driver(profile_index)
+                                        self._warmup_visit(driver)
+                                        logger.info("Cooldown: browser restarted successfully")
+                                        break
+                                    except Exception as restart_err:
+                                        if restart_attempt < max_restart_retries:
+                                            wait_sec = 5.0 * restart_attempt
+                                            logger.warning(
+                                                "Cooldown: browser restart failed (attempt %d/%d): %s. Retrying in %.1fs...",
+                                                restart_attempt,
+                                                max_restart_retries,
+                                                restart_err,
+                                                wait_sec,
+                                            )
+                                            time.sleep(wait_sec)
+                                        else:
+                                            logger.error(
+                                                "Cooldown: browser restart failed after %d attempts. Stopping scraper.",
+                                                max_restart_retries,
+                                                exc_info=True,
+                                            )
+                                            result["errors"].append(f"Cooldown restart failed after {max_restart_retries} attempts: {str(restart_err)}")
+                                            # Mark flag to stop processing - cannot continue without a valid driver
+                                            logger.error("Stopping scraper: cannot continue without valid browser session")
+                                            driver_restart_failed = True
+                                            driver = None
+                                            break  # Break from retry loop
                     except Exception as e:
                         logger.error(
                             "Error processing listing %d (%s): %s",
@@ -1273,6 +1524,10 @@ class ControllerDetailScraperUndetected:
                         )
                         result["errors"].append(f"Listing {idx}: {str(e)}")
                         result["listings_failed"] += 1
+                        # If driver is None or invalid, we can't continue
+                        if driver is None:
+                            logger.error("Driver is None after error. Stopping scraper.")
+                            break
                         continue
             finally:
                 safe_driver_quit(driver)
@@ -1283,6 +1538,7 @@ class ControllerDetailScraperUndetected:
             logger.info("Total listings (index): %d", result["total_urls"])
             logger.info("Detail records in JSON: %d", len(result["detail_data"]))
             logger.info("Listings scraped this run: %d", result["listings_scraped"])
+            logger.info("Listings skipped (already scraped): %d", result.get("listings_skipped", 0))
             logger.info("Listings failed this run: %d", result["listings_failed"])
             logger.info("HTML files saved this run: %d", len(result["html_files"]))
             logger.info("Scrape duration: %.2f seconds", result["scrape_duration"])

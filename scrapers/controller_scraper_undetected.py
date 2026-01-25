@@ -375,12 +375,9 @@ class ControllerScraperUndetected:
         return None
     
     def scrape_listings(self, date: Optional[datetime] = None, max_pages: Optional[int] = None, start_page: int = 1) -> Dict:
-        """Scrape Controller.com listings using undetected-chromedriver.
-        
-        Args:
-            date: Optional date for output directory. Defaults to today.
-            max_pages: Optional maximum pages to scrape. None = all pages.
-            start_page: Page number to start from (for resuming). Default: 1.
+        """Scrape Controller.com listings. Skip-if-exists + backfill (same date).
+        Re-runs skip pages with HTML; append only new. If HTML exists but JSON not saved,
+        backfill from HTML -> JSON. No overwrite/delete. start_page kept for compat (unused).
         """
         if date is None:
             date = datetime.now()
@@ -389,30 +386,38 @@ class ControllerScraperUndetected:
         date_str = date.strftime("%Y-%m-%d")
         output_dir = self.raw_controller_path / date_str / "index"
         output_dir.mkdir(parents=True, exist_ok=True)
+        listings_file = output_dir / "listings_metadata.json"
         
         logger.info("=" * 60)
         logger.info("Controller.com Scraper (undetected-chromedriver)")
         logger.info(f"Date: {date_str}")
         logger.info(f"Output directory: {output_dir}")
-        if start_page > 1:
-            logger.info(f"Resuming from page: {start_page}")
+        logger.info("Skip-if-exists + backfill: same date re-runs safe; no overwrite/delete.")
         logger.info("=" * 60)
         
-        # Load existing listings if resuming
-        all_listings = []
-        listings_file = output_dir / "listings_metadata.json"
-        if start_page > 1 and listings_file.exists():
+        all_listings: List[Dict] = []
+        if listings_file.exists():
             try:
                 with open(listings_file, 'r', encoding='utf-8') as f:
                     all_listings = json.load(f)
-                logger.info(f"Loaded {len(all_listings):,} existing listings from previous scrape")
+                logger.info(f"Loaded {len(all_listings):,} existing listings from JSON")
             except Exception as e:
-                logger.warning(f"Could not load existing listings: {e}, starting fresh")
+                logger.warning(f"Could not load JSON: {e}, starting fresh")
                 all_listings = []
+        
+        done_pages = self._discover_done_pages(output_dir)
+        if done_pages:
+            logger.info(f"Found {len(done_pages)} pages with HTML (skip-if-exists)")
+        all_listings = self._backfill_listings_from_html(
+            output_dir, all_listings, done_pages, listings_file
+        )
+        done_pages_set = set(done_pages)
+        done_urls = {l.get("listing_url") for l in all_listings if l.get("listing_url")}
         
         result = {
             "date": date_str,
             "pages_scraped": 0,
+            "pages_skipped": 0,
             "total_listings": 0,
             "html_files": [],
             "listings_data": [],
@@ -421,112 +426,101 @@ class ControllerScraperUndetected:
         }
         
         driver = None
-        page_num = start_page - 1  # Initialize before try block to avoid UnboundLocalError
+        page_num = 1
+        current_url = self.START_URL
+        last_fetched_page = 0
+        
+        logger.info("=" * 60)
+        logger.info("Starting pages (skip existing, append only)...")
+        logger.info("Stopping: Y = Z (current_end >= total_listings)")
+        logger.info("=" * 60)
         
         try:
             driver = self._setup_driver()
             
-            # Construct URL for starting page
-            if start_page > 1:
-                current_url = f"/listings/search?page={start_page}"
-            else:
-                current_url = self.START_URL
-            page_num = start_page
-            
-            logger.info("=" * 60)
-            if start_page > 1:
-                logger.info(f"Resuming scrape from page {start_page}...")
-            else:
-                logger.info("Starting to scrape ALL pages...")
-            logger.info("Stopping condition: Y = Z (current_end >= total_listings)")
-            logger.info("Example: '5,093 - 5,122 of 5,122 Listings' means last page")
-            logger.info("=" * 60)
-            
             while current_url:
-                # Check max_pages limit only if specified (for testing)
                 if max_pages and page_num > max_pages:
                     logger.info(f"Reached max pages limit ({max_pages})")
                     break
                 
-                logger.info(f"Processing page {page_num}...")
+                page_url = f"/listings/search?page={page_num}" if page_num > 1 else self.START_URL
                 
-                # Human-like: Pause before starting to process page (like thinking)
-                if page_num > start_page:
-                    pre_page_pause = random.uniform(1.0, 3.0)
-                    logger.debug(f"Pre-page pause: {pre_page_pause:.2f} seconds (human-like)")
-                    time.sleep(pre_page_pause)
-                
-                self._wait_for_rate_limit()
-                
-                html_content = self._fetch_page(driver, current_url)
-                
-                if html_content is None:
-                    logger.warning(f"Failed to fetch page {page_num}, skipping")
-                    result["errors"].append(f"Page {page_num}: Failed to fetch")
+                if page_num in done_pages_set:
+                    result["pages_skipped"] += 1
+                    path = self._page_html_path(page_num, output_dir)
+                    try:
+                        with open(path, "r", encoding="utf-8", errors="replace") as f:
+                            html_content = f.read()
+                    except Exception as e:
+                        logger.warning(f"Could not read {path.name}: {e}, will re-fetch")
+                        done_pages_set.discard(page_num)
+                        result["pages_skipped"] -= 1
+                        continue
+                    pagination_info = self._extract_pagination_info(html_content)
+                    if page_num == 1 and pagination_info:
+                        result["total_listings_count"] = pagination_info['total_listings']
+                        npp = pagination_info['current_end'] - pagination_info['current_start'] + 1
+                        result["expected_pages"] = (pagination_info['total_listings'] + npp - 1) // max(1, npp)
+                    if pagination_info and pagination_info.get('is_last_page', False):
+                        logger.info(f"Reached last page (page {page_num}, from HTML)")
+                        break
+                    next_url = self._find_next_page_url(html_content, page_url)
+                    if next_url:
+                        current_url = next_url[len(self.BASE_URL):] if next_url.startswith(self.BASE_URL) else next_url
+                        page_num += 1
+                        continue
                     break
                 
-                # Save HTML
-                html_file = self._save_html_page(html_content, page_num, output_dir)
-                result["html_files"].append(str(html_file))
-                
-                # Extract pagination info
-                pagination_info = self._extract_pagination_info(html_content)
-                
-                # On first page (or start_page): Get total count and calculate expected pages
-                if page_num == start_page and pagination_info:
-                    result["total_listings_count"] = pagination_info['total_listings']
-                    total_listings = pagination_info['total_listings']
-                    listings_per_page = pagination_info['current_end'] - pagination_info['current_start'] + 1
-                    expected_pages = (total_listings + listings_per_page - 1) // listings_per_page
-                    result["expected_pages"] = expected_pages
-                    logger.info("=" * 60)
-                    logger.info("Pagination Information (from page 1):")
-                    logger.info(f"  Total listings on site: {total_listings:,}")
-                    logger.info(f"  Listings per page: ~{listings_per_page}")
-                    logger.info(f"  Expected pages: ~{expected_pages}")
-                    logger.info("  Stopping when: current_end >= total_listings (Y = Z)")
-                    logger.info("=" * 60)
-                
-                # Extract listings
-                full_url = urljoin(self.BASE_URL, current_url) if not current_url.startswith('http') else current_url
-                listings = self._extract_listings(html_content, full_url)
-                all_listings.extend(listings)
-                
-                logger.info(f"Page {page_num}: Extracted {len(listings)} listings (Total so far: {len(all_listings):,})")
-                
-                # Save JSON incrementally after each page (so progress is saved)
-                listings_file = output_dir / "listings_metadata.json"
-                with open(listings_file, 'w', encoding='utf-8') as f:
-                    json.dump(all_listings, f, indent=2, ensure_ascii=False)
-                logger.debug(f"Saved {len(all_listings):,} listings to JSON (incremental save)")
-                
-                # Check if last page: Y = Z (current_end >= total_listings)
-                if pagination_info and pagination_info.get('is_last_page', False):
-                    logger.info("=" * 60)
-                    logger.info(f"Reached last page (page {page_num})")
-                    logger.info(f"Condition met: current_end ({pagination_info['current_end']:,}) >= total_listings ({pagination_info['total_listings']:,})")
-                    logger.info("Pagination complete - all pages scraped!")
-                    logger.info("=" * 60)
-                    break
-                
-                # Find next page URL
-                next_url = self._find_next_page_url(html_content, current_url)
-                if next_url:
-                    if next_url.startswith(self.BASE_URL):
-                        current_url = next_url[len(self.BASE_URL):]
+                if page_num not in done_pages_set:
+                    logger.info(f"Processing page {page_num}...")
+                    if last_fetched_page and page_num > last_fetched_page:
+                        time.sleep(random.uniform(1.0, 3.0))
+                    self._wait_for_rate_limit()
+                    html_content = self._fetch_page(driver, current_url)
+                    if html_content is None:
+                        result["errors"].append(f"Page {page_num}: Failed to fetch")
+                        break
+                    self._save_html_page(html_content, page_num, output_dir)
+                    result["html_files"].append(str(self._page_html_path(page_num, output_dir)))
+                    result["pages_scraped"] += 1
+                    done_pages_set.add(page_num)
+                    last_fetched_page = page_num
+                    
+                    pagination_info = self._extract_pagination_info(html_content)
+                    if page_num == 1 and pagination_info:
+                        result["total_listings_count"] = pagination_info['total_listings']
+                        npp = pagination_info['current_end'] - pagination_info['current_start'] + 1
+                        result["expected_pages"] = (pagination_info['total_listings'] + npp - 1) // max(1, npp)
+                        logger.info("=" * 60)
+                        logger.info(f"  Total listings on site: {pagination_info['total_listings']:,}")
+                        logger.info("=" * 60)
+                    
+                    full_url = urljoin(self.BASE_URL, current_url) if not current_url.startswith('http') else current_url
+                    listings = self._extract_listings(html_content, full_url)
+                    new_count = 0
+                    for li in listings:
+                        u = li.get("listing_url")
+                        if u and u not in done_urls:
+                            done_urls.add(u)
+                            all_listings.append(li)
+                            new_count += 1
+                    logger.info(f"Page {page_num}: Extracted {len(listings)} listings ({new_count} new, total: {len(all_listings):,})")
+                    
+                    with open(listings_file, 'w', encoding='utf-8') as f:
+                        json.dump(all_listings, f, indent=2, ensure_ascii=False)
+                    
+                    if pagination_info and pagination_info.get('is_last_page', False):
+                        logger.info(f"Reached last page (page {page_num})")
+                        break
+                    
+                    next_url = self._find_next_page_url(html_content, page_url)
+                    if next_url:
+                        current_url = next_url[len(self.BASE_URL):] if next_url.startswith(self.BASE_URL) else next_url
+                        page_num += 1
                     else:
-                        current_url = next_url
-                    page_num += 1
-                else:
-                    # No next page found - check if we're close to total (fallback safety check)
-                    if result.get("total_listings_count"):
-                        scraped_ratio = len(all_listings) / result["total_listings_count"]
-                        if scraped_ratio >= 0.99:
-                            logger.info(f"No next page found and scraped {len(all_listings):,} listings ({scraped_ratio*100:.1f}% of {result['total_listings_count']:,}) - assuming complete")
-                        else:
-                            logger.warning(f"No next page found but only scraped {len(all_listings):,} listings ({scraped_ratio*100:.1f}% of {result['total_listings_count']:,}) - may be incomplete")
-                    logger.info("No next page URL found - pagination complete")
-                    break
+                        if result.get("total_listings_count") and len(all_listings) / result["total_listings_count"] >= 0.99:
+                            logger.info("No next page; scraped >= 99% of total - assuming complete")
+                        break
                 
         except Exception as e:
             logger.error(f"Scraper failed: {e}", exc_info=True)
@@ -534,12 +528,10 @@ class ControllerScraperUndetected:
         finally:
             _safe_driver_quit(driver)
         
-        result["pages_scraped"] = page_num
         result["total_listings"] = len(all_listings)
         result["listings_data"] = all_listings
         result["scrape_duration"] = time.time() - start_time
         
-        # Final JSON save (already saved incrementally, but ensure final save)
         if all_listings:
             with open(listings_file, 'w', encoding='utf-8') as f:
                 json.dump(all_listings, f, indent=2, ensure_ascii=False)
@@ -547,7 +539,8 @@ class ControllerScraperUndetected:
         
         logger.info("=" * 60)
         logger.info("Scrape Summary")
-        logger.info(f"Pages scraped: {result['pages_scraped']}")
+        logger.info(f"Pages scraped this run: {result['pages_scraped']}")
+        logger.info(f"Pages skipped (existing HTML): {result.get('pages_skipped', 0)}")
         if result.get("expected_pages"):
             logger.info(f"Expected pages: ~{result['expected_pages']}")
         logger.info(f"Total listings: {result['total_listings']:,}")
@@ -561,17 +554,65 @@ class ControllerScraperUndetected:
         
         return result
     
+    def _page_html_path(self, page_num: int, output_dir: Path) -> Path:
+        """Path for page HTML file."""
+        return output_dir / f"page_{page_num:04d}.html"
+
+    def _discover_done_pages(self, output_dir: Path) -> List[int]:
+        """Discover page numbers we already have HTML for (skip-if-exists)."""
+        pages = []
+        for f in output_dir.glob("page_*.html"):
+            m = re.match(r"page_(\d+)\.html", f.name)
+            if m:
+                pages.append(int(m.group(1)))
+        return sorted(pages)
+
+    def _backfill_listings_from_html(
+        self,
+        output_dir: Path,
+        all_listings: List[Dict],
+        done_pages: List[int],
+        listings_file: Path,
+    ) -> List[Dict]:
+        """Backfill JSON from existing HTML pages (HTML scraped but JSON not saved yet).
+        Merges into all_listings by listing_url, appends only new. Saves JSON.
+        """
+        done_urls = {l.get("listing_url") for l in all_listings if l.get("listing_url")}
+        added = 0
+        for p in done_pages:
+            path = self._page_html_path(p, output_dir)
+            if not path.exists():
+                continue
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    html = f.read()
+            except Exception as e:
+                logger.warning("Backfill: could not read %s: %s", path.name, e)
+                continue
+            page_url = f"/listings/search?page={p}" if p > 1 else self.START_URL
+            listings = self._extract_listings(html, urljoin(self.BASE_URL, page_url))
+            for li in listings:
+                u = li.get("listing_url")
+                if u and u not in done_urls:
+                    done_urls.add(u)
+                    all_listings.append(li)
+                    added += 1
+        if added:
+            with open(listings_file, "w", encoding="utf-8") as f:
+                json.dump(all_listings, f, indent=2, ensure_ascii=False)
+            logger.info("Backfill: added %d listings from %d HTML pages -> JSON", added, len(done_pages))
+        return all_listings
+
     def _save_html_page(self, html_content: str, page_num: int, output_dir: Path) -> Path:
         """Save HTML page to disk."""
-        filename = f"page_{page_num:04d}.html"
-        filepath = output_dir / filename
+        path = self._page_html_path(page_num, output_dir)
         html_bytes = html_content.encode('utf-8')
-        with open(filepath, 'wb') as f:
+        with open(path, 'wb') as f:
             f.write(html_bytes)
         file_hash = hashlib.md5(html_bytes).hexdigest()
-        file_size = filepath.stat().st_size
-        logger.info(f"Saved page {page_num}: {filename} ({file_size:,} bytes, MD5: {file_hash})")
-        return filepath
+        file_size = path.stat().st_size
+        logger.info(f"Saved page {page_num}: {path.name} ({file_size:,} bytes, MD5: {file_hash})")
+        return path
     
     def _extract_listings(self, html_content: str, page_url: str) -> List[Dict]:
         """Extract listings from HTML (same logic as Playwright version)."""

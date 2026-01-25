@@ -3,7 +3,12 @@
 Downloads FAA Aircraft Registration Database and saves to local storage.
 """
 
+import sys
 from pathlib import Path
+
+# Add parent directory to path so imports work from runners/ directory
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from scrapers.faa_scraper import FAAScraper
 from utils.logger import setup_logging, get_logger
 
@@ -11,7 +16,7 @@ from utils.logger import setup_logging, get_logger
 def main():
     """Run FAA scraper."""
     # Setup logging with file output
-    log_dir = Path(__file__).parent / "logs"
+    log_dir = Path(__file__).parent.parent / "logs"
     log_dir.mkdir(exist_ok=True)
     log_file = log_dir / "faa_log.txt"
     
