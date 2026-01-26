@@ -31,6 +31,14 @@ class Config:
     environment: Environment
     dry_run: bool = False
     log_level: str = "INFO"
+    
+    # PostgreSQL configuration
+    postgres_host: Optional[str] = None
+    postgres_port: Optional[int] = None
+    postgres_database: Optional[str] = None
+    postgres_user: Optional[str] = None
+    postgres_password: Optional[str] = None
+    postgres_connection_string: Optional[str] = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -55,10 +63,24 @@ class Config:
         # Log level
         log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
+        # PostgreSQL configuration
+        postgres_host = os.getenv("POSTGRES_HOST")
+        postgres_port = int(os.getenv("POSTGRES_PORT", "5432")) if os.getenv("POSTGRES_PORT") else None
+        postgres_database = os.getenv("POSTGRES_DATABASE")
+        postgres_user = os.getenv("POSTGRES_USER")
+        postgres_password = os.getenv("POSTGRES_PASSWORD")
+        postgres_connection_string = os.getenv("POSTGRES_CONNECTION_STRING")
+
         return cls(
             environment=environment,
             dry_run=dry_run,
             log_level=log_level,
+            postgres_host=postgres_host,
+            postgres_port=postgres_port,
+            postgres_database=postgres_database,
+            postgres_user=postgres_user,
+            postgres_password=postgres_password,
+            postgres_connection_string=postgres_connection_string,
         )
 
     def is_dry_run(self) -> bool:

@@ -15,22 +15,14 @@ This module handles:
 - **Config Module**: Central configuration loader with environment variable support
 - **Utils Module**: Logging and other utilities
 - **Scrapers Module**: Web scrapers for aircraft market data
-- **Database Module**: PostgreSQL database operations (future)
+- **Database Module**: PostgreSQL database operations (schema, client, data loader)
 
 ## Setup
 
 ### Prerequisites
 
 - Python 3.12
-- Akamai Object Storage account with S3-compatible API access
-
-### 🔑 **First Time Setup? Get Your Akamai Credentials**
-
-**👉 See [AKAMAI_SETUP_GUIDE.md](./docs/AKAMAI_SETUP_GUIDE.md) for a complete step-by-step guide on how to:**
-- Create Access Keys and Secret Keys
-- Find your Endpoint URL
-- Get your Bucket Name and Region
-- Configure everything properly
+- PostgreSQL database (optional, for database loader)
 
 ### Installation
 
@@ -63,11 +55,29 @@ pip install -r requirements.txt
 
 ### Environment Variables
 
-Optional environment variables (see `env/.env.example` if exists):
+Optional environment variables (see `.env.example` if exists):
 
+**General:**
 - `ENVIRONMENT`: `dev`, `prod`, or `local` (defaults to `local`)
 - `DRY_RUN`: `true` or `false` (local defaults to true)
 - `LOG_LEVEL`: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+
+**PostgreSQL Database:**
+- `POSTGRES_CONNECTION_STRING`: Full PostgreSQL connection URI (recommended)
+  - Format: `postgres://user:password@host:port/database?sslmode=require`
+- OR use individual components:
+  - `POSTGRES_HOST`: Database hostname
+  - `POSTGRES_PORT`: Database port (default: 5432)
+  - `POSTGRES_DATABASE`: Database name
+  - `POSTGRES_USER`: Database username
+  - `POSTGRES_PASSWORD`: Database password
+
+**Example `.env` file:**
+```env
+ENVIRONMENT=local
+LOG_LEVEL=INFO
+POSTGRES_CONNECTION_STRING=postgres://user:password@host:port/database?sslmode=require
+```
 
 ## Usage
 
@@ -175,9 +185,33 @@ etl-pipeline/
 └── README.md
 ```
 
+## Database Integration
+
+The pipeline includes PostgreSQL database integration:
+
+- **Schema**: `database/schema.sql` - Complete database schema with tables for aircraft, listings, sales, history, and raw data
+- **Client**: `database/postgres_client.py` - PostgreSQL connection and query utilities
+- **Data Loader**: `database/data_loader.py` - Loads scraped data from `store/` into PostgreSQL
+- **Runner**: `runners/run_database_loader.py` - Command to load latest data
+
+### Running Database Loader
+
+```bash
+# Load latest scraped data to PostgreSQL
+python runners/run_database_loader.py
+```
+
+The loader will:
+- Find the latest date data for each source (controller, aircraftexchange, internaldb)
+- Insert new records or update existing ones
+- Track changes in history table
+- Store raw data in append-only table
+
+See [DATABASE_LOADER.md](./docs/DATABASE_LOADER.md) for detailed documentation.
+
 ## Next Steps
 
 - ✅ Scrapers implemented for Controller, AircraftExchange, and FAA
-- Add PostgreSQL database integration
+- ✅ PostgreSQL database integration
 - Implement data normalization pipelines
 - Add data validation and quality checks

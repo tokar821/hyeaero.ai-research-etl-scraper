@@ -1,16 +1,18 @@
-# Database Loader Module
+# Database Loader - Complete Guide
 
 ## Overview
 
-The database loader module (`database/data_loader.py`) loads scraped data from the `store/` directory into PostgreSQL database. It only processes the **latest date** data for each source to avoid duplicate processing.
+Loads ALL scraped data from Controller, AircraftExchange, FAA, and Internal DB into PostgreSQL. Captures every field from every source - structured in normalized tables, original data in `raw_data_store`, documents in `documents` table.
 
 ## Features
 
-- ✅ **Latest Date Only**: Automatically finds and processes only the latest date data
-- ✅ **Smart Upsert**: Inserts new records or updates existing ones
-- ✅ **Change Tracking**: Records all field-level changes in `aircraft_listing_history` table
-- ✅ **Deduplication**: Skips records that already exist with same or newer data
-- ✅ **Multi-Source**: Supports Controller, AircraftExchange, and Internal DB (CSV)
+- ✅ **Complete Data Capture**: All fields from all sources stored
+- ✅ **Latest Date Only**: Processes only latest date data
+- ✅ **Smart Upsert**: Inserts new or updates existing records
+- ✅ **Change Tracking**: Records all field changes in history table
+- ✅ **Engine/APU Tables**: Structured engine and APU data
+- ✅ **FAA Tables**: Complete FAA registration and reference data
+- ✅ **RAG-Ready**: Structured data optimized for embeddings
 
 ## Database Schema
 
@@ -18,11 +20,27 @@ See `database/schema.sql` for complete schema definition.
 
 ### Key Tables
 
-- **aircraft**: Canonical aircraft master data (by serial number)
-- **aircraft_listings**: Current/latest snapshot of listings
-- **aircraft_listing_history**: Change history (price, status, etc.)
-- **aircraft_sales**: Historical sales data (append-only)
-- **raw_data_store**: Original raw data (append-only)
+**Core:**
+- **aircraft** - Master aircraft records (serial/registration, manufacturer, model, condition, based_at, FAA fields)
+- **aircraft_listings** - Current listings (all fields: engines, APU, seller contact, condition, etc.)
+- **aircraft_engines** - Engine data (position 1/2, hours, cycles, TBO, notes)
+- **aircraft_apus** - APU data (hours, maintenance programs, notes)
+- **aircraft_sales** - Historical sales (with deferment flags, feature_source)
+- **aircraft_listing_history** - Change tracking
+
+**FAA:**
+- **faa_registrations** - Complete MASTER.txt data (owner, address, certification, mode S codes)
+- **faa_aircraft_reference** - ACFTREF.txt (manufacturer/model codes with specs)
+- **faa_engine_reference** - ENGINE.txt (engine specifications)
+- **faa_dealers** - DEALER.txt (dealer certificates)
+- **faa_deregistered** - DEREG.txt (deregistered aircraft)
+- **faa_document_index** - DOCINDEX.txt (document index)
+- **faa_reserved** - RESERVED.txt (reserved registrations)
+
+**Storage:**
+- **raw_data_store** - All original JSON/CSV/TXT data (append-only)
+- **documents** - PDF/TXT extracted text for RAG
+- **ingestion_runs** - ETL execution tracking
 
 ## Usage
 
@@ -38,11 +56,13 @@ cd D:\HyeAero\etl-pipeline; python runners/run_database_loader.py
 2. **Finds Latest Dates**:
    - Controller: Latest date in `store/raw/controller/YYYY-MM-DD/`
    - AircraftExchange: Latest date in `store/raw/aircraftexchange/YYYY-MM-DD/`
+   - FAA: Latest date in `store/raw/faa/YYYY-MM-DD/`
    - Internal DB: Always loads (no date-based filtering)
 3. **Loads Data**:
-   - Controller: `index/listings_metadata.json` and `details/details_metadata.json`
-   - AircraftExchange: `index/listings_metadata.json` and `details/details_metadata.json`
-   - Internal DB: `aircraft.csv` and `recent_sales.csv`
+   - **Controller**: `index/listings_metadata.json`, `details/details_metadata.json` (all 50+ fields)
+   - **AircraftExchange**: `index/listings_metadata.json`, `details/details_metadata.json`, `manufacturers/*/` (all 40+ fields)
+   - **FAA**: All 7 TXT files (MASTER, ACFTREF, DEALER, DEREG, ENGINE, DOCINDEX, RESERVED) + PDFs
+   - **Internal DB**: `aircraft.csv`, `recent_sales.csv` (all 35+ fields)
 4. **Upserts Records**:
    - Checks if listing exists (by `listing_url`)
    - If exists and newer/same date: Updates and tracks changes
@@ -60,6 +80,9 @@ store/raw/
 ├── aircraftexchange/2026-01-23/
 │   ├── index/listings_metadata.json  → aircraft_listings
 │   └── details/details_metadata.json → aircraft_listings (enriched)
+├── faa/2026-01-23/
+│   └── extracted/
+│       └── MASTER.txt                 → aircraft (registration data)
 └── internaldb/
     ├── aircraft.csv                   → aircraft (master data)
     └── recent_sales.csv               → aircraft_sales (append-only)
@@ -109,6 +132,7 @@ Database Loader Completed!
 ============================================================
 Controller: {'date': '2026-01-23', 'listings': 5072, 'details': 907, 'inserted': 100, 'updated': 800, 'skipped': 0}
 AircraftExchange: {'date': '2026-01-23', 'listings': 1000, 'details': 500, 'inserted': 200, 'updated': 300, 'skipped': 0}
+FAA: {'date': '2026-01-23', 'aircraft': 350000, 'inserted': 10000, 'updated': 340000, 'skipped': 0}
 Internal DB: {'aircraft': 5000, 'sales': 10000, 'inserted': 5000, 'updated': 0, 'skipped': 0}
 Total Inserted: 5300
 Total Updated: 1100
@@ -130,19 +154,35 @@ When you run the loader again:
    - Update records with newer data
    - Skip older date data
 
-## PostgreSQL Connection
+## Commands
 
-Connection string is hardcoded in `runners/run_database_loader.py`:
-
-```python
-connection_string = (
-    "postgres://avnadmin:AVNS_IT0JkCtP0vz1x-an3Aj@"
-    "pg-134dedd1-allevi8marketing-47f2.c.aivencloud.com:13079/"
-    "defaultdb?sslmode=require"
-)
+### Test (10 records each)
+```powershell
+python runners/run_database_loader.py --test
 ```
 
-**Note**: Consider moving to environment variables for production.
+### Load All Data
+```powershell
+python runners/run_database_loader.py
+```
+
+### Load Specific Source Only
+```powershell
+# FAA only
+python runners/run_database_loader.py --faa-only
+
+# Internal DB only  
+python runners/run_database_loader.py --internal-only
+```
+
+### Custom Limits
+```powershell
+python runners/run_database_loader.py --limit-controller 100 --limit-faa 1000
+```
+
+## PostgreSQL Connection
+
+Uses environment variables (see `docs/ENVIRONMENT_SETUP.md`) or falls back to hardcoded connection string.
 
 ## Troubleshooting
 

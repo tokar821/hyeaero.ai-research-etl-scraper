@@ -136,13 +136,212 @@ class PostgresClient:
 
         try:
             with self.get_connection() as conn:
+                # Execute statements individually to avoid transaction rollback issues
+                # This way, if one statement fails, others that succeeded are already committed
+                statements = self._split_sql_statements(sql_content)
+                logger.info(f"Executing {len(statements)} schema statements individually...")
+                
+                executed = 0
+                skipped = 0
+                errors = []
+                
                 with conn.cursor() as cur:
-                    cur.execute(sql_content)
+                    for i, statement in enumerate(statements, 1):
+                        if not statement.strip():
+                            continue
+                            
+                        try:
+                            cur.execute(statement)
+                            conn.commit()  # Commit after each successful statement
+                            executed += 1
+                        except Exception as stmt_error:
+                            error_msg = str(stmt_error)
+                            # Ignore "already exists" errors - these are expected and harmless
+                            if "already exists" in error_msg.lower() or "duplicate" in error_msg.lower():
+                                conn.commit()  # Commit anyway (object already exists is fine)
+                                skipped += 1
+                                if skipped <= 3:  # Log first few skips
+                                    logger.debug(f"Statement {i} skipped (already exists): {error_msg[:100]}")
+                            else:
+                                # Log other errors but continue
+                                errors.append(f"Statement {i}: {error_msg[:200]}")
+                                logger.warning(f"Statement {i} failed (continuing): {error_msg[:200]}")
+                                conn.rollback()  # Rollback this statement only
+                    
+                    if errors:
+                        logger.warning(f"Schema creation completed with {len(errors)} errors (executed {executed}, skipped {skipped})")
+                    else:
+                        logger.info(f"Database schema created/verified successfully (executed {executed}, skipped {skipped})")
+                    
+                    # Verify critical tables exist
+                    critical_tables = ['aircraft', 'aircraft_listings', 'faa_registrations']
+                    missing_tables = []
+                    for table in critical_tables:
+                        check_table = f"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = '{table}')"
+                        cur.execute(check_table)
+                        exists = cur.fetchone()[0]
+                        if not exists:
+                            missing_tables.append(table)
+                    
+                    if missing_tables:
+                        logger.error(f"Critical tables missing after schema creation: {missing_tables}")
+                        logger.error("Schema creation may have failed. Please check database connection and permissions.")
+                        raise Exception(f"Schema creation incomplete: missing tables {missing_tables}")
+                    
+                    logger.info(f"Verified critical tables exist: {', '.join(critical_tables)}")
+                    
+                    # If aircraft table exists, check if we need to fix serial_number constraint
+                    check_query = """
+                        SELECT column_name, is_nullable 
+                        FROM information_schema.columns 
+                        WHERE table_name = 'aircraft' AND column_name = 'serial_number'
+                    """
+                    cur.execute(check_query)
+                    result = cur.fetchone()
+                    if result and result[1] == 'NO':
+                        # serial_number is NOT NULL, need to fix it
+                        logger.info("Fixing serial_number constraint to allow NULL...")
+                        fix_sql = """
+                            ALTER TABLE aircraft ALTER COLUMN serial_number DROP NOT NULL;
+                            ALTER TABLE aircraft DROP CONSTRAINT IF EXISTS aircraft_serial_number_key;
+                            ALTER TABLE aircraft DROP CONSTRAINT IF EXISTS at_least_one_identifier;
+                            ALTER TABLE aircraft ADD CONSTRAINT at_least_one_identifier 
+                                CHECK (serial_number IS NOT NULL OR registration_number IS NOT NULL);
+                            CREATE UNIQUE INDEX IF NOT EXISTS idx_aircraft_serial_number_unique 
+                                ON aircraft(serial_number) WHERE serial_number IS NOT NULL;
+                        """
+                        cur.execute(fix_sql)
+                        logger.info("serial_number constraint fixed")
+                        
             logger.info("Database schema created successfully")
             return True
         except Exception as e:
             logger.error(f"Failed to create schema: {e}", exc_info=True)
             raise
+    
+    def _split_sql_statements(self, sql_content: str) -> List[str]:
+        """Split SQL content into individual statements.
+        
+        Handles:
+        - Multi-line statements
+        - Comments (-- and /* */)
+        - Strings (single and double quotes)
+        - Dollar-quoted strings (for function bodies)
+        
+        Args:
+            sql_content: Full SQL file content
+            
+        Returns:
+            List of individual SQL statements
+        """
+        statements = []
+        current_statement = []
+        in_block_comment = False
+        in_string = False
+        string_char = None
+        in_dollar_quote = False
+        dollar_tag = None
+        
+        i = 0
+        content = sql_content
+        
+        while i < len(content):
+            char = content[i]
+            next_char = content[i+1] if i+1 < len(content) else None
+            prev_char = content[i-1] if i > 0 else None
+            
+            # Handle block comments
+            if not in_string and not in_dollar_quote and char == '/' and next_char == '*':
+                in_block_comment = True
+                i += 2
+                continue
+            if in_block_comment and char == '*' and next_char == '/':
+                in_block_comment = False
+                i += 2
+                continue
+            if in_block_comment:
+                i += 1
+                continue
+            
+            # Handle line comments (only at start of line or after whitespace)
+            if not in_string and not in_dollar_quote and char == '-' and next_char == '-':
+                # Skip rest of line
+                while i < len(content) and content[i] != '\n':
+                    i += 1
+                if i < len(content):
+                    current_statement.append('\n')
+                    i += 1
+                continue
+            
+            # Handle dollar-quoted strings ($$ or $tag$)
+            if not in_string and not in_block_comment:
+                if char == '$':
+                    # Check for dollar quote start
+                    j = i + 1
+                    tag = ''
+                    while j < len(content) and content[j] != '$':
+                        tag += content[j]
+                        j += 1
+                    if j < len(content):  # Found closing $
+                        if not in_dollar_quote:
+                            # Starting dollar quote
+                            in_dollar_quote = True
+                            dollar_tag = tag
+                            current_statement.append('$' + tag + '$')
+                            i = j + 1
+                            continue
+                        elif tag == dollar_tag:
+                            # Ending dollar quote
+                            in_dollar_quote = False
+                            dollar_tag = None
+                            current_statement.append('$' + tag + '$')
+                            i = j + 1
+                            continue
+                
+                if in_dollar_quote:
+                    current_statement.append(char)
+                    i += 1
+                    continue
+            
+            # Handle regular strings
+            if not in_dollar_quote and (char == "'" or char == '"'):
+                if not in_string:
+                    in_string = True
+                    string_char = char
+                elif char == string_char:
+                    # Check if escaped (not \' or \")
+                    if prev_char != '\\' or (i > 1 and content[i-2] == '\\'):
+                        in_string = False
+                        string_char = None
+                current_statement.append(char)
+                i += 1
+                continue
+            
+            if in_string:
+                current_statement.append(char)
+                i += 1
+                continue
+            
+            # Check for statement terminator (semicolon not in string or dollar quote)
+            if char == ';' and not in_string and not in_dollar_quote:
+                current_statement.append(char)
+                statement = ''.join(current_statement).strip()
+                if statement and not statement.isspace() and not statement.startswith('--'):
+                    statements.append(statement)
+                current_statement = []
+                i += 1
+                continue
+            
+            current_statement.append(char)
+            i += 1
+        
+        # Add any remaining statement
+        if current_statement:
+            statement = ''.join(current_statement).strip()
+            if statement and not statement.isspace() and not statement.startswith('--'):
+                statements.append(statement)
+        
+        return statements
 
     def test_connection(self) -> bool:
         """Test database connection.
