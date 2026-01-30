@@ -171,6 +171,14 @@ class BaseLoader:
         
         return cleaned if cleaned else None
 
+    @staticmethod
+    def _truncate(s: Optional[str], max_len: int) -> Optional[str]:
+        """Truncate string to max_len for VARCHAR columns. Returns None if s is None."""
+        if s is None:
+            return None
+        s = str(s).strip()
+        return s[:max_len] if len(s) > max_len else (s or None)
+
     def _get_or_create_aircraft(
         self, serial_number: Optional[str], registration: Optional[str],
         manufacturer: Optional[str], model: Optional[str],
@@ -192,6 +200,15 @@ class BaseLoader:
         Returns:
             aircraft_id UUID string or None if both serial_number and registration are None
         """
+        # Truncate to schema limits: serial_number/manufacturer/model/based_at 100, registration 50, condition/category 50
+        serial_number = self._truncate(serial_number, 100)
+        registration = self._truncate(registration, 50)
+        manufacturer = self._truncate(manufacturer, 100)
+        model = self._truncate(model, 100)
+        based_at = self._truncate(based_at, 100)
+        condition = self._truncate(condition, 50)
+        category = self._truncate(category, 50)
+
         # At least one identifier must exist (serial_number OR registration_number)
         # OR we must have manufacturer+model to create a placeholder
         if not serial_number and not registration:
@@ -213,8 +230,8 @@ class BaseLoader:
                     logger.warning(f"Failed to create aircraft placeholder (mfr={manufacturer}, model={model}): {e}")
             return None
 
-        # Clean registration
-        registration = self._clean_registration(registration)
+        # Clean registration (also enforces 50-char limit)
+        registration = self._clean_registration(registration) if registration else None
 
         # Try to find existing aircraft by serial_number or registration_number
         query = """
@@ -372,7 +389,12 @@ class BaseLoader:
         try:
             # Store each record separately for granular access
             if isinstance(data, list):
-                for record in data:
+                total = len(data)
+                logger.info(f"Storing raw_data_store: {source_platform}/{source_type} - {total} records")
+                stored = 0
+                progress_every = max(1, min(50, total // 20))  # every 50 records, or ~20 steps for small totals
+                for idx, record in enumerate(data):
+                    n = idx + 1
                     listing_url = record.get('listing_url') if isinstance(record, dict) else None
                     # Check if already exists
                     check_query = """
@@ -387,6 +409,9 @@ class BaseLoader:
                         (source_platform, source_type, ingestion_date, listing_url, str(file_path))
                     )
                     if exists:
+                        # Progress every N records (whether we insert or skip)
+                        if n % progress_every == 0 or n == total:
+                            logger.info(f"raw_data_store progress: {n}/{total} processed, {stored} inserted")
                         continue  # Skip if already stored
                     
                     insert_query = """
@@ -402,6 +427,11 @@ class BaseLoader:
                             str(file_path), listing_url, json.dumps(record)
                         )
                     )
+                    stored += 1
+                    # Progress every N records and at end
+                    if n % progress_every == 0 or n == total:
+                        logger.info(f"raw_data_store progress: {n}/{total} processed, {stored} inserted")
+                logger.info(f"raw_data_store done: {source_platform}/{source_type} - {stored} inserted, {total - stored} skipped (already present)")
             else:
                 # Single record
                 listing_url = data.get('listing_url') if isinstance(data, dict) else None

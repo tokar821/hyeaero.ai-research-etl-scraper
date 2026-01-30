@@ -19,16 +19,11 @@ from config.config_loader import get_config
 
 def main():
     """Run database loader."""
-    # Setup logging
-    log_dir = Path(__file__).parent.parent / "logs"
-    log_dir.mkdir(exist_ok=True)
-    log_file = log_dir / "database_loader_log.txt"
-    
-    setup_logging(log_file=str(log_file), log_file_overwrite=True)
-    logger = get_logger(__name__)
-    
-    # Parse command line arguments
+    # Parse command line arguments first to get log level
     parser = argparse.ArgumentParser(description='Load scraped data into PostgreSQL database')
+    parser.add_argument('--log-level', type=str, default='DEBUG',
+                       choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+                       help='Log level (default: DEBUG for detailed logs on all loaders; use INFO for progress only)')
     parser.add_argument('--limit-controller', type=int, default=None, 
                        help='Limit number of Controller listings to process (for testing)')
     parser.add_argument('--limit-aircraftexchange', type=int, default=None,
@@ -47,8 +42,18 @@ def main():
                        help='Process only FAA data (skip Controller, AircraftExchange, Internal DB)')
     parser.add_argument('--internal-only', action='store_true',
                        help='Process only Internal DB data (skip Controller, AircraftExchange, FAA)')
+    parser.add_argument('--skip-controller-index', action='store_true',
+                       help='Skip Controller index (listings); run only Controller detail and other sources')
     
     args = parser.parse_args()
+    
+    # Setup logging with specified log level
+    log_dir = Path(__file__).parent.parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / "database_loader_log.txt"
+    
+    setup_logging(log_level=args.log_level, log_file=str(log_file), log_file_overwrite=True)
+    logger = get_logger(__name__)
     
     # If --test flag, set small limits
     if args.test:
@@ -316,7 +321,9 @@ def main():
             'faa': args.limit_faa,
             'internal': args.limit_internal,
         }
-        summary = loader.load_all_latest(limits=limits)
+        if args.skip_controller_index:
+            logger.info("SKIP CONTROLLER INDEX: will process only Controller detail (and other sources)")
+        summary = loader.load_all_latest(limits=limits, skip_controller_index=args.skip_controller_index)
         
         # Print summary
         logger.info("=" * 60)

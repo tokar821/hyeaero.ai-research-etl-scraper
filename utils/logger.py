@@ -19,6 +19,14 @@ class TimestampFormatter(logging.Formatter):
         )
 
 
+class FlushingStreamHandler(logging.StreamHandler):
+    """StreamHandler that flushes after each emit so console output appears immediately."""
+    
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        self.flush()
+
+
 def setup_logging(
     log_level: Optional[str] = None,
     log_file: Optional[str] = None,
@@ -43,7 +51,7 @@ def setup_logging(
     root_logger.setLevel(numeric_level)
     root_logger.handlers.clear()
 
-    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler = FlushingStreamHandler(sys.stdout)
     console_handler.setLevel(numeric_level)
     console_handler.setFormatter(TimestampFormatter())
     root_logger.addHandler(console_handler)

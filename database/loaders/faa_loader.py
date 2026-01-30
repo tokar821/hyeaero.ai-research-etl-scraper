@@ -92,8 +92,12 @@ class FAALoader(BaseLoader):
                     if fieldnames and fieldnames[-1] == '':
                         logger.info("Detected trailing comma in header (empty field at end)")
                     
-                    row_count = 0
-                    for i, row in enumerate(reader):
+                    rows = list(reader)
+                    total_rows = len(rows)
+                    logger.info(f"Found {total_rows} rows in ACFTREF.txt (processing up to {limit if limit else 'all'})")
+                    
+                    total_to_process = min(limit, total_rows) if limit else total_rows
+                    for i, row in enumerate(rows):
                         # Normalize row keys (remove BOM from field names)
                         if fieldname_map:
                             normalized_row = {}
@@ -101,7 +105,7 @@ class FAALoader(BaseLoader):
                                 normalized_key = fieldname_map.get(key, key.strip('\ufeff').strip())
                                 normalized_row[normalized_key] = value
                             row = normalized_row
-                        row_count += 1
+                        
                         # Always load full ACFTREF for lookup (needed for MASTER decoding)
                         # But limit storage if requested
                         # Handle BOM character in CODE field name
@@ -132,13 +136,16 @@ class FAALoader(BaseLoader):
                             stats['acftref']['records'] += 1
                         # Store in faa_aircraft_reference table (limited if needed)
                         if not limit or i < limit:
+                            # Log progress for every record being stored
+                            logger.info(f"Processing FAA ACFTREF row {i + 1}/{total_to_process}: Code={code}")
                             self._store_faa_aircraft_reference(row, ingestion_date)
                             stats['acftref']['inserted'] += 1
+                            logger.info(f"[OK] [{i + 1}/{total_to_process}] Stored FAA ACFTREF: Code={code}")
                             # Also store raw data
                             self._store_faa_csv_row('faa', 'acftref', ingestion_date, acftref_file, row)
                 
-                logger.info(f"Processed {row_count} rows, loaded {len(acftref_lookup)} ACFTREF codes for lookup")
-                if len(acftref_lookup) == 0 and row_count > 0:
+                logger.info(f"FAA ACFTREF processing complete: {stats['acftref']['inserted']} inserted, loaded {len(acftref_lookup)} codes for lookup")
+                if len(acftref_lookup) == 0 and total_rows > 0:
                     logger.error("No ACFTREF codes loaded despite processing rows! Check CODE field extraction.")
                     logger.error(f"Field names were: {fieldnames}")
             except Exception as e:
@@ -153,28 +160,46 @@ class FAALoader(BaseLoader):
             try:
                 with open(master_file, 'r', encoding='utf-8', errors='ignore') as f:
                     reader = csv.DictReader(f)
-                    for i, row in enumerate(reader):
+                    # Count total rows first for progress tracking
+                    rows = list(reader)
+                    total_rows = len(rows)
+                    logger.info(f"Found {total_rows} rows in MASTER.txt (processing up to {limit if limit else 'all'})")
+                    
+                    total_to_process = min(limit, total_rows) if limit else total_rows
+                    for i, row in enumerate(rows):
                         if limit and i >= limit:
                             logger.info(f"Reached FAA MASTER limit ({limit}), stopping")
                             break
+                        
+                        # Log progress for every record
+                        logger.info(f"Processing FAA MASTER row {i + 1}/{total_to_process}: N-Number={row.get('N-NUMBER', 'N/A')}")
+                        
                         # Decode manufacturer/model using ACFTREF lookup
                         mfr_mdl_code = row.get('MFR MDL CODE', row.get('mfr mdl code', row.get('mfr_mdl_code', ''))).strip()
                         if mfr_mdl_code and mfr_mdl_code in acftref_lookup:
                             ref = acftref_lookup[mfr_mdl_code]
                             row['_decoded_manufacturer'] = ref['manufacturer']
                             row['_decoded_model'] = ref['model']
+                            logger.debug(f"Decoded MFR/MDL code {mfr_mdl_code} -> {ref['manufacturer']} {ref['model']}")
+                        else:
+                            logger.debug(f"No ACFTREF lookup found for code: {mfr_mdl_code}")
                         
                         result = self._upsert_faa_aircraft(row, ingestion_date)
                         if result == 'inserted':
                             stats['master']['inserted'] += 1
                             stats['total_inserted'] += 1
+                            logger.info(f"[OK] [{i + 1}/{total_to_process}] Inserted FAA MASTER: N-Number={row.get('N-NUMBER')}, Serial={row.get('SERIAL-NUMBER')}")
                         elif result == 'updated':
                             stats['master']['updated'] += 1
                             stats['total_updated'] += 1
+                            logger.info(f"[OK] [{i + 1}/{total_to_process}] Updated FAA MASTER: N-Number={row.get('N-NUMBER')}")
                         else:
                             stats['master']['skipped'] += 1
                             stats['total_skipped'] += 1
+                            logger.info(f"[SKIP] [{i + 1}/{total_to_process}] Skipped FAA MASTER: N-Number={row.get('N-NUMBER')}")
                         stats['master']['records'] += 1
+                    
+                    logger.info(f"FAA MASTER processing complete: {stats['master']['inserted']} inserted, {stats['master']['updated']} updated, {stats['master']['skipped']} skipped")
             except Exception as e:
                 logger.error(f"Error loading MASTER.txt: {e}", exc_info=True)
         else:
@@ -189,16 +214,28 @@ class FAALoader(BaseLoader):
                     reader = csv.DictReader(f)
                     if reader.fieldnames:
                         logger.info(f"DEALER field names detected: {list(reader.fieldnames)[:10]}")
-                    for i, row in enumerate(reader):
+                    rows = list(reader)
+                    total_rows = len(rows)
+                    logger.info(f"Found {total_rows} rows in DEALER.txt (processing up to {limit if limit else 'all'})")
+                    
+                    total_to_process = min(limit, total_rows) if limit else total_rows
+                    for i, row in enumerate(rows):
                         if limit and i >= limit:
                             logger.info(f"Reached FAA DEALER limit ({limit}), stopping")
                             break
+                        
+                        # Log progress for every record
+                        logger.info(f"Processing FAA DEALER row {i + 1}/{total_to_process}: Name={row.get('NAME', 'N/A')[:30]}")
+                        
                         self._store_faa_dealer(row, ingestion_date)
                         stats['dealer']['records'] += 1
                         stats['dealer']['inserted'] += 1
                         stats['total_inserted'] += 1
+                        logger.info(f"[OK] [{i + 1}/{total_to_process}] Stored FAA DEALER: Name={row.get('NAME', 'N/A')[:50]}")
                         # Also store raw data
                         self._store_faa_csv_row('faa', 'dealer', ingestion_date, dealer_file, row)
+                    
+                    logger.info(f"FAA DEALER processing complete: {stats['dealer']['inserted']} inserted")
             except Exception as e:
                 logger.error(f"Error loading DEALER.txt: {e}", exc_info=True)
 
@@ -211,20 +248,33 @@ class FAALoader(BaseLoader):
                     reader = csv.DictReader(f)
                     if reader.fieldnames:
                         logger.info(f"DEREG field names detected: {list(reader.fieldnames)[:10]}")
-                    for i, row in enumerate(reader):
+                    rows = list(reader)
+                    total_rows = len(rows)
+                    logger.info(f"Found {total_rows} rows in DEREG.txt (processing up to {limit if limit else 'all'})")
+                    
+                    total_to_process = min(limit, total_rows) if limit else total_rows
+                    for i, row in enumerate(rows):
                         if limit and i >= limit:
                             logger.info(f"Reached FAA DEREG limit ({limit}), stopping")
                             break
+                        
+                        # Log progress for every record
+                        logger.info(f"Processing FAA DEREG row {i + 1}/{total_to_process}: Serial={row.get('SERIAL-NUMBER', 'N/A')}, N-Number={row.get('N-NUMBER', 'N/A')}")
+                        
                         result = self._store_faa_deregistered(row, ingestion_date)
                         stats['dereg']['records'] += 1
                         if result:
                             stats['dereg']['inserted'] += 1
                             stats['total_inserted'] += 1
+                            logger.info(f"[OK] [{i + 1}/{total_to_process}] Inserted FAA DEREG: Serial={row.get('SERIAL-NUMBER')}, N-Number={row.get('N-NUMBER')}")
                         else:
                             stats['dereg']['skipped'] += 1
                             stats['total_skipped'] += 1
+                            logger.info(f"[SKIP] [{i + 1}/{total_to_process}] Skipped FAA DEREG: Serial={row.get('SERIAL-NUMBER')}, N-Number={row.get('N-NUMBER')}")
                         # Also store raw data
                         self._store_faa_csv_row('faa', 'dereg', ingestion_date, dereg_file, row)
+                    
+                    logger.info(f"FAA DEREG processing complete: {stats['dereg']['inserted']} inserted, {stats['dereg']['skipped']} skipped")
             except Exception as e:
                 logger.error(f"Error loading DEREG.txt: {e}", exc_info=True)
 
@@ -237,16 +287,28 @@ class FAALoader(BaseLoader):
                     reader = csv.DictReader(f)
                     if reader.fieldnames:
                         logger.info(f"ENGINE field names detected: {list(reader.fieldnames)[:10]}")
-                    for i, row in enumerate(reader):
+                    rows = list(reader)
+                    total_rows = len(rows)
+                    logger.info(f"Found {total_rows} rows in ENGINE.txt (processing up to {limit if limit else 'all'})")
+                    
+                    total_to_process = min(limit, total_rows) if limit else total_rows
+                    for i, row in enumerate(rows):
                         if limit and i >= limit:
                             logger.info(f"Reached FAA ENGINE limit ({limit}), stopping")
                             break
+                        
+                        # Log progress for every record
+                        logger.info(f"Processing FAA ENGINE row {i + 1}/{total_to_process}: Code={row.get('CODE', 'N/A')}")
+                        
                         self._store_faa_engine_reference(row, ingestion_date)
                         stats['engine']['records'] += 1
                         stats['engine']['inserted'] += 1
                         stats['total_inserted'] += 1
+                        logger.info(f"[OK] [{i + 1}/{total_to_process}] Stored FAA ENGINE: Code={row.get('CODE', 'N/A')}")
                         # Also store raw data
                         self._store_faa_csv_row('faa', 'engine', ingestion_date, engine_file, row)
+                    
+                    logger.info(f"FAA ENGINE processing complete: {stats['engine']['inserted']} inserted")
             except Exception as e:
                 logger.error(f"Error loading ENGINE.txt: {e}", exc_info=True)
 
@@ -259,19 +321,33 @@ class FAALoader(BaseLoader):
                     reader = csv.DictReader(f)
                     if reader.fieldnames:
                         logger.info(f"DOCINDEX field names detected: {list(reader.fieldnames)[:10]}")
-                    for i, row in enumerate(reader):
+                    rows = list(reader)
+                    total_rows = len(rows)
+                    logger.info(f"Found {total_rows} rows in DOCINDEX.txt (processing up to {limit if limit else 'all'})")
+                    
+                    total_to_process = min(limit, total_rows) if limit else total_rows
+                    for i, row in enumerate(rows):
                         if limit and i >= limit:
                             logger.info(f"Reached FAA DOCINDEX limit ({limit}), stopping")
                             break
-                        if self._store_faa_document_index(row, ingestion_date):
+                        
+                        # Log progress for every record
+                        logger.info(f"Processing FAA DOCINDEX row {i + 1}/{total_to_process}: Serial-ID={row.get('SERIAL-ID', 'N/A')}, DOC-ID={row.get('DOC-ID', 'N/A')}")
+                        
+                        result = self._store_faa_document_index(row, ingestion_date)
+                        stats['docindex']['records'] += 1
+                        if result:
                             stats['docindex']['inserted'] += 1
                             stats['total_inserted'] += 1
+                            logger.info(f"[OK] [{i + 1}/{total_to_process}] Inserted FAA DOCINDEX: Serial-ID={row.get('SERIAL-ID')}, DOC-ID={row.get('DOC-ID')}")
                         else:
                             stats['docindex']['skipped'] += 1
                             stats['total_skipped'] += 1
-                        stats['docindex']['records'] += 1
+                            logger.info(f"[SKIP] [{i + 1}/{total_to_process}] Skipped FAA DOCINDEX: Serial-ID={row.get('SERIAL-ID')}, DOC-ID={row.get('DOC-ID')}")
                         # Also store raw data
                         self._store_faa_csv_row('faa', 'docindex', ingestion_date, docindex_file, row)
+                    
+                    logger.info(f"FAA DOCINDEX processing complete: {stats['docindex']['inserted']} inserted, {stats['docindex']['skipped']} skipped")
             except Exception as e:
                 logger.error(f"Error loading DOCINDEX.txt: {e}", exc_info=True)
 
@@ -284,31 +360,51 @@ class FAALoader(BaseLoader):
                     reader = csv.DictReader(f)
                     if reader.fieldnames:
                         logger.info(f"RESERVED field names detected: {list(reader.fieldnames)[:10]}")
-                    for i, row in enumerate(reader):
+                    rows = list(reader)
+                    total_rows = len(rows)
+                    logger.info(f"Found {total_rows} rows in RESERVED.txt (processing up to {limit if limit else 'all'})")
+                    
+                    total_to_process = min(limit, total_rows) if limit else total_rows
+                    for i, row in enumerate(rows):
                         if limit and i >= limit:
                             logger.info(f"Reached FAA RESERVED limit ({limit}), stopping")
                             break
+                        
+                        # Log progress for every record
+                        logger.info(f"Processing FAA RESERVED row {i + 1}/{total_to_process}: N-Number={row.get('N-NUMBER', 'N/A')}")
+                        
                         self._store_faa_reserved(row, ingestion_date)
                         stats['reserved']['records'] += 1
                         stats['reserved']['inserted'] += 1
                         stats['total_inserted'] += 1
+                        logger.info(f"[OK] [{i + 1}/{total_to_process}] Stored FAA RESERVED: N-Number={row.get('N-NUMBER', 'N/A')}")
                         # Also store raw data
                         self._store_faa_csv_row('faa', 'reserved', ingestion_date, reserved_file, row)
+                    
+                    logger.info(f"FAA RESERVED processing complete: {stats['reserved']['inserted']} inserted")
             except Exception as e:
                 logger.error(f"Error loading RESERVED.txt: {e}", exc_info=True)
 
         # Load PDF files (ardata.pdf and documentation)
         # Note: PDFs are always loaded (not limited) as they're complete documents
         pdf_files = list(base_path.glob("*.pdf")) + list(extracted_path.glob("*.pdf"))
-        for pdf_file in pdf_files:
-            logger.info(f"Loading FAA PDF: {pdf_file.name}")
-            result = self._store_faa_pdf('faa', ingestion_date, pdf_file)
-            if result == 'inserted':
-                stats['pdfs']['inserted'] += 1
-                stats['total_inserted'] += 1
-            else:
-                stats['pdfs']['skipped'] += 1
-            stats['pdfs']['files'] += 1
+        total_pdfs = len(pdf_files)
+        if total_pdfs > 0:
+            logger.info(f"Found {total_pdfs} PDF files to process")
+            for i, pdf_file in enumerate(pdf_files):
+                logger.info(f"Processing FAA PDF {i + 1}/{total_pdfs}: {pdf_file.name}")
+                result = self._store_faa_pdf('faa', ingestion_date, pdf_file)
+                if result == 'inserted':
+                    stats['pdfs']['inserted'] += 1
+                    stats['total_inserted'] += 1
+                    logger.info(f"[OK] [{i + 1}/{total_pdfs}] Stored FAA PDF: {pdf_file.name}")
+                else:
+                    stats['pdfs']['skipped'] += 1
+                    stats['total_skipped'] += 1
+                    logger.info(f"[SKIP] [{i + 1}/{total_pdfs}] Skipped FAA PDF: {pdf_file.name}")
+                stats['pdfs']['files'] += 1
+            
+            logger.info(f"FAA PDF processing complete: {stats['pdfs']['inserted']} inserted, {stats['pdfs']['skipped']} skipped")
 
         return stats
 

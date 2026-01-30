@@ -56,7 +56,11 @@ class DataLoader:
         # Use any loader's find_latest_date method (they all inherit from BaseLoader)
         return self.controller_loader.find_latest_date(source)
 
-    def load_all_latest(self, limits: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    def load_all_latest(
+        self,
+        limits: Optional[Dict[str, int]] = None,
+        skip_controller_index: bool = False,
+    ) -> Dict[str, Any]:
         """Load latest date data from all sources.
 
         Args:
@@ -65,6 +69,7 @@ class DataLoader:
                 - 'aircraftexchange': Limit aircraftexchange listings
                 - 'faa': Limit FAA records
                 - 'internal': Limit internal DB records
+            skip_controller_index: If True, skip Controller index (listings); run only Controller detail.
 
         Returns:
             Dict with summary statistics
@@ -86,7 +91,9 @@ class DataLoader:
         if controller_limit != -1:  # -1 means skip, None means process all, number means limit
             controller_date = self.find_latest_date('controller')
             if controller_date:
-                stats = self.controller_loader.load_controller_data(controller_date, limit=controller_limit)
+                stats = self.controller_loader.load_controller_data(
+                    controller_date, limit=controller_limit, skip_index=skip_controller_index
+                )
                 summary['controller'] = {'date': controller_date.isoformat(), **stats}
                 summary['total_inserted'] += stats.get('inserted', 0)
                 summary['total_updated'] += stats.get('updated', 0)

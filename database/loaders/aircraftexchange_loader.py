@@ -50,45 +50,96 @@ class AircraftExchangeLoader(BaseLoader):
         index_file = base_path / "index" / "listings_metadata.json"
         if index_file.exists():
             logger.info(f"Loading AircraftExchange index data from {index_file}")
-            with open(index_file, 'r', encoding='utf-8') as f:
-                listings = json.load(f)
-            stats['listings'] = len(listings)
+            try:
+                with open(index_file, 'r', encoding='utf-8') as f:
+                    listings = json.load(f)
+                logger.info(f"Successfully loaded {len(listings)} AircraftExchange index listings from JSON")
+                stats['listings'] = len(listings)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse AircraftExchange index JSON: {e}")
+                return stats
+            except Exception as e:
+                logger.error(f"Error reading AircraftExchange index file: {e}", exc_info=True)
+                return stats
+            
             # Store raw data first (limited if needed)
             listings_to_store = listings[:limit] if limit else listings
+            logger.debug(f"Storing {len(listings_to_store)} AircraftExchange index records to raw_data_store")
             self._store_raw_data('aircraftexchange', 'index', ingestion_date, index_file, listings_to_store)
+            
+            logger.info(f"Processing {len(listings_to_store)} AircraftExchange index listings...")
             for i, listing in enumerate(listings):
                 if limit and i >= limit:
                     logger.info(f"Reached AircraftExchange index limit ({limit}), stopping")
                     break
+                
+                # Log progress for every record
+                logger.info(f"Processing AircraftExchange index listing {i + 1}/{len(listings_to_store)}: {listing.get('listing_url', 'N/A')}")
+                
+                logger.debug(f"Processing listing: URL={listing.get('listing_url')}, ID={listing.get('listing_id')}, "
+                           f"Price={listing.get('listing_price')}, Model={listing.get('aircraft_model')}")
+                
                 result = self._upsert_aircraftexchange_listing(listing, ingestion_date)
                 if result == 'inserted':
                     stats['inserted'] += 1
+                    logger.info(f"[OK] [{i + 1}/{len(listings_to_store)}] Inserted AircraftExchange listing: {listing.get('listing_url')}")
                 elif result == 'updated':
                     stats['updated'] += 1
+                    logger.info(f"[OK] [{i + 1}/{len(listings_to_store)}] Updated AircraftExchange listing: {listing.get('listing_url')}")
                 else:
                     stats['skipped'] += 1
+                    logger.info(f"[SKIP] [{i + 1}/{len(listings_to_store)}] Skipped AircraftExchange listing: {listing.get('listing_url')}")
+            
+            logger.info(f"AircraftExchange index processing complete: {stats['inserted']} inserted, {stats['updated']} updated, {stats['skipped']} skipped")
 
         # Load detail listings
         details_file = base_path / "details" / "details_metadata.json"
         if details_file.exists():
             logger.info(f"Loading AircraftExchange detail data from {details_file}")
-            with open(details_file, 'r', encoding='utf-8') as f:
-                details = json.load(f)
-            stats['details'] = len(details)
+            try:
+                with open(details_file, 'r', encoding='utf-8') as f:
+                    details = json.load(f)
+                logger.info(f"Successfully loaded {len(details)} AircraftExchange detail records from JSON")
+                stats['details'] = len(details)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse AircraftExchange detail JSON: {e}")
+                return stats
+            except Exception as e:
+                logger.error(f"Error reading AircraftExchange detail file: {e}", exc_info=True)
+                return stats
+            
             # Store raw data first (limited if needed)
             details_to_store = details[:limit] if limit else details
+            logger.debug(f"Storing {len(details_to_store)} AircraftExchange detail records to raw_data_store")
             self._store_raw_data('aircraftexchange', 'detail', ingestion_date, details_file, details_to_store)
+            
+            logger.info(f"Processing {len(details_to_store)} AircraftExchange detail records...")
             for i, detail in enumerate(details):
                 if limit and i >= limit:
                     logger.info(f"Reached AircraftExchange detail limit ({limit}), stopping")
                     break
+                
+                # Log progress for every record
+                logger.info(f"Processing AircraftExchange detail {i + 1}/{len(details_to_store)}: {detail.get('listing_url', 'N/A')}")
+                
+                # Log key extracted fields
+                logger.debug(f"Processing detail: URL={detail.get('listing_url')}, "
+                           f"Serial={detail.get('serial_number')}, Reg={detail.get('registration_number')}, "
+                           f"Make={detail.get('manufacturer')}, Model={detail.get('model')}, "
+                           f"Year={detail.get('manufacturer_year')}, Price={detail.get('ask_price')}")
+                
                 result = self._upsert_aircraftexchange_detail(detail, ingestion_date)
                 if result == 'inserted':
                     stats['inserted'] += 1
+                    logger.info(f"[OK] [{i + 1}/{len(details_to_store)}] Inserted AircraftExchange detail: {detail.get('listing_url')}")
                 elif result == 'updated':
                     stats['updated'] += 1
+                    logger.info(f"[OK] [{i + 1}/{len(details_to_store)}] Updated AircraftExchange detail: {detail.get('listing_url')}")
                 else:
                     stats['skipped'] += 1
+                    logger.info(f"[SKIP] [{i + 1}/{len(details_to_store)}] Skipped AircraftExchange detail: {detail.get('listing_url')}")
+            
+            logger.info(f"AircraftExchange detail processing complete: {stats['inserted']} inserted, {stats['updated']} updated, {stats['skipped']} skipped")
 
         # Load manufacturer data
         manufacturers_path = base_path / "manufacturers"
@@ -121,16 +172,25 @@ class AircraftExchangeLoader(BaseLoader):
                     )
                     
                     # Process listings (may overlap with index, but deduplication handled by listing_url)
+                    logger.info(f"Processing {len(listings_to_store)} manufacturer listings for {manufacturer_name}...")
                     for i, listing in enumerate(manufacturer_listings):
                         if limit and i >= limit:
+                            logger.info(f"Reached manufacturer listings limit ({limit}) for {manufacturer_name}, stopping")
                             break  # Stop processing but continue to next manufacturer
+                        
+                        # Log progress for every record
+                        logger.info(f"Processing {manufacturer_name} manufacturer listing {i + 1}/{len(listings_to_store)}: {listing.get('listing_url', 'N/A')}")
+                        
                         result = self._upsert_aircraftexchange_listing(listing, ingestion_date)
                         if result == 'inserted':
                             stats['inserted'] += 1
+                            logger.info(f"[OK] [{i + 1}/{len(listings_to_store)}] Inserted {manufacturer_name} manufacturer listing: {listing.get('listing_url')}")
                         elif result == 'updated':
                             stats['updated'] += 1
+                            logger.info(f"[OK] [{i + 1}/{len(listings_to_store)}] Updated {manufacturer_name} manufacturer listing: {listing.get('listing_url')}")
                         else:
                             stats['skipped'] += 1
+                            logger.info(f"[SKIP] [{i + 1}/{len(listings_to_store)}] Skipped {manufacturer_name} manufacturer listing: {listing.get('listing_url')}")
                 
                 # Load manufacturer details
                 manufacturer_details_file = manufacturer_folder / "details" / "details_metadata.json"
@@ -151,16 +211,25 @@ class AircraftExchangeLoader(BaseLoader):
                     )
                     
                     # Process details (may overlap with main details, but deduplication handled by listing_url)
+                    logger.info(f"Processing {len(details_to_store)} manufacturer details for {manufacturer_name}...")
                     for i, detail in enumerate(manufacturer_details):
                         if limit and i >= limit:
+                            logger.info(f"Reached manufacturer details limit ({limit}) for {manufacturer_name}, stopping")
                             break  # Stop processing but continue to next manufacturer
+                        
+                        # Log progress for every record
+                        logger.info(f"Processing {manufacturer_name} manufacturer detail {i + 1}/{len(details_to_store)}: {detail.get('listing_url', 'N/A')}")
+                        
                         result = self._upsert_aircraftexchange_detail(detail, ingestion_date)
                         if result == 'inserted':
                             stats['inserted'] += 1
+                            logger.info(f"[OK] [{i + 1}/{len(details_to_store)}] Inserted {manufacturer_name} manufacturer detail: {detail.get('listing_url')}")
                         elif result == 'updated':
                             stats['updated'] += 1
+                            logger.info(f"[OK] [{i + 1}/{len(details_to_store)}] Updated {manufacturer_name} manufacturer detail: {detail.get('listing_url')}")
                         else:
                             stats['skipped'] += 1
+                            logger.info(f"[SKIP] [{i + 1}/{len(details_to_store)}] Skipped {manufacturer_name} manufacturer detail: {detail.get('listing_url')}")
 
         return stats
 

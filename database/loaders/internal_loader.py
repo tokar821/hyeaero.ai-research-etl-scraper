@@ -39,37 +39,76 @@ class InternalLoader(BaseLoader):
         aircraft_file = internal_path / "aircraft.csv"
         if aircraft_file.exists():
             logger.info(f"Loading aircraft data from {aircraft_file}")
-            with open(aircraft_file, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for i, row in enumerate(reader):
-                    if limit and i >= limit:
-                        logger.info(f"Reached Internal DB aircraft limit ({limit}), stopping")
-                        break
-                    result = self._upsert_internal_aircraft(row)
-                    if result == 'inserted':
-                        stats['inserted'] += 1
-                    elif result == 'updated':
-                        stats['updated'] += 1
-                    else:
-                        stats['skipped'] += 1
-                    stats['aircraft'] += 1
+            try:
+                with open(aircraft_file, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    rows = list(reader)
+                    total_rows = len(rows)
+                    logger.info(f"Found {total_rows} rows in aircraft.csv (processing up to {limit if limit else 'all'})")
+                    
+                    total_to_process = min(limit, total_rows) if limit else total_rows
+                    for i, row in enumerate(rows):
+                        if limit and i >= limit:
+                            logger.info(f"Reached Internal DB aircraft limit ({limit}), stopping")
+                            break
+                        
+                        # Log progress for every record
+                        logger.info(f"Processing Internal DB aircraft {i + 1}/{total_to_process}: Serial={row.get('Serial Number', 'N/A')}, Reg={row.get('Registration Number', 'N/A')}")
+                        
+                        logger.debug(f"Processing aircraft: Serial={row.get('Serial Number')}, Reg={row.get('Registration Number')}, "
+                                   f"Make={row.get('Make')}, Model={row.get('Model')}, Year={row.get('Year')}")
+                        
+                        result = self._upsert_internal_aircraft(row)
+                        if result == 'inserted':
+                            stats['inserted'] += 1
+                            logger.info(f"[OK] [{i + 1}/{total_to_process}] Inserted Internal DB aircraft: Serial={row.get('Serial Number')}")
+                        elif result == 'updated':
+                            stats['updated'] += 1
+                            logger.info(f"[OK] [{i + 1}/{total_to_process}] Updated Internal DB aircraft: Serial={row.get('Serial Number')}")
+                        else:
+                            stats['skipped'] += 1
+                            logger.info(f"[SKIP] [{i + 1}/{total_to_process}] Skipped Internal DB aircraft: Serial={row.get('Serial Number')}")
+                        stats['aircraft'] += 1
+                    
+                    logger.info(f"Internal DB aircraft processing complete: {stats['inserted']} inserted, {stats['updated']} updated, {stats['skipped']} skipped")
+            except Exception as e:
+                logger.error(f"Error loading aircraft.csv: {e}", exc_info=True)
 
         # Load recent_sales.csv
         sales_file = internal_path / "recent_sales.csv"
         if sales_file.exists():
             logger.info(f"Loading sales data from {sales_file}")
-            with open(sales_file, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for i, row in enumerate(reader):
-                    if limit and i >= limit:
-                        logger.info(f"Reached Internal DB sales limit ({limit}), stopping")
-                        break
-                    result = self._upsert_internal_sale(row)
-                    if result == 'inserted':
-                        stats['inserted'] += 1
-                    else:
-                        stats['skipped'] += 1
-                    stats['sales'] += 1
+            try:
+                with open(sales_file, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    rows = list(reader)
+                    total_rows = len(rows)
+                    logger.info(f"Found {total_rows} rows in recent_sales.csv (processing up to {limit if limit else 'all'})")
+                    
+                    total_to_process = min(limit, total_rows) if limit else total_rows
+                    for i, row in enumerate(rows):
+                        if limit and i >= limit:
+                            logger.info(f"Reached Internal DB sales limit ({limit}), stopping")
+                            break
+                        
+                        # Log progress for every record
+                        logger.info(f"Processing Internal DB sale {i + 1}/{total_to_process}: Serial={row.get('Serial Number', 'N/A')}, Price={row.get('Sold Price', 'N/A')}")
+                        
+                        logger.debug(f"Processing sale: Serial={row.get('Serial Number')}, Make={row.get('Make')}, "
+                                   f"Model={row.get('Model')}, Sold Price={row.get('Sold Price')}, Date={row.get('Date Sold')}")
+                        
+                        result = self._upsert_internal_sale(row)
+                        if result == 'inserted':
+                            stats['inserted'] += 1
+                            logger.info(f"[OK] [{i + 1}/{total_to_process}] Inserted Internal DB sale: Serial={row.get('Serial Number')}, Price={row.get('Sold Price')}")
+                        else:
+                            stats['skipped'] += 1
+                            logger.info(f"[SKIP] [{i + 1}/{total_to_process}] Skipped Internal DB sale: Serial={row.get('Serial Number')}")
+                        stats['sales'] += 1
+                    
+                    logger.info(f"Internal DB sales processing complete: {stats['inserted']} inserted, {stats['skipped']} skipped")
+            except Exception as e:
+                logger.error(f"Error loading recent_sales.csv: {e}", exc_info=True)
 
         return stats
 
