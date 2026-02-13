@@ -17,11 +17,18 @@ logger = logging.getLogger(__name__)
 class InternalLoader(BaseLoader):
     """Loader for internal database CSV files."""
 
-    def load_internal_db_data(self, limit: Optional[int] = None) -> Dict[str, int]:
+    def load_internal_db_data(
+        self,
+        limit: Optional[int] = None,
+        aircraft_only: bool = False,
+        sales_only: bool = False,
+    ) -> Dict[str, int]:
         """Load internal database CSV files.
 
         Args:
             limit: Optional limit on number of records to process
+            aircraft_only: If True, load only aircraft.csv (skip recent_sales.csv)
+            sales_only: If True, load only recent_sales.csv (skip aircraft.csv)
 
         Returns:
             Dict with counts: {'aircraft': X, 'sales': Y, 'inserted': Z, 'updated': W, 'skipped': N}
@@ -35,9 +42,9 @@ class InternalLoader(BaseLoader):
             'skipped': 0,
         }
 
-        # Load aircraft.csv
+        # Load aircraft.csv (unless sales_only)
         aircraft_file = internal_path / "aircraft.csv"
-        if aircraft_file.exists():
+        if not sales_only and aircraft_file.exists():
             logger.info(f"Loading aircraft data from {aircraft_file}")
             try:
                 with open(aircraft_file, 'r', encoding='utf-8') as f:
@@ -74,9 +81,9 @@ class InternalLoader(BaseLoader):
             except Exception as e:
                 logger.error(f"Error loading aircraft.csv: {e}", exc_info=True)
 
-        # Load recent_sales.csv
+        # Load recent_sales.csv (unless aircraft_only)
         sales_file = internal_path / "recent_sales.csv"
-        if sales_file.exists():
+        if not aircraft_only and sales_file.exists():
             logger.info(f"Loading sales data from {sales_file}")
             try:
                 with open(sales_file, 'r', encoding='utf-8') as f:
@@ -138,6 +145,19 @@ class InternalLoader(BaseLoader):
         if not aircraft_id:
             return 'skipped'
 
+        # Avoid unique violation: only set registration_number if not already used by another aircraft
+        registration_to_set = registration
+        if registration:
+            conflict = self.db.execute_query(
+                "SELECT id FROM aircraft WHERE registration_number = %s AND id != %s LIMIT 1",
+                (registration, aircraft_id)
+            )
+            if conflict:
+                registration_to_set = None  # keep current; another aircraft already has this reg
+                logger.debug(
+                    f"Registration {registration} already used by another aircraft; not updating for aircraft_id={aircraft_id}"
+                )
+
         # This is master data, update aircraft table
         update_query = """
             UPDATE aircraft
@@ -162,7 +182,7 @@ class InternalLoader(BaseLoader):
                 self._parse_int(row.get('Delivery Year')),
                 row.get('Category'),
                 row.get('Aircraft Status'),
-                registration if registration else None,
+                registration_to_set,
                 self._parse_int(row.get('Number of Passengers')),
                 row.get('Registration Country'),
                 row.get('Based Country'),

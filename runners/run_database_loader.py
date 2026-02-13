@@ -30,6 +30,8 @@ def main():
                        help='Limit number of AircraftExchange listings to process (for testing)')
     parser.add_argument('--limit-faa', type=int, default=None,
                        help='Limit number of FAA records to process (for testing)')
+    parser.add_argument('--faa-master-offset', type=int, default=None,
+                       help='Skip first N rows of FAA MASTER.txt (e.g. 89156 to continue from row 89156; use after partial save)')
     parser.add_argument('--limit-internal', type=int, default=None,
                        help='Limit number of Internal DB records to process (for testing)')
     parser.add_argument('--test', action='store_true',
@@ -42,6 +44,10 @@ def main():
                        help='Process only FAA data (skip Controller, AircraftExchange, Internal DB)')
     parser.add_argument('--internal-only', action='store_true',
                        help='Process only Internal DB data (skip Controller, AircraftExchange, FAA)')
+    parser.add_argument('--internal-aircraft-only', action='store_true',
+                       help='Process only Internal DB aircraft.csv (skip recent_sales and other sources)')
+    parser.add_argument('--internal-sales-only', action='store_true',
+                       help='Process only Internal DB recent_sales.csv (skip aircraft and other sources)')
     parser.add_argument('--skip-controller-index', action='store_true',
                        help='Skip Controller index (listings); run only Controller detail and other sources')
     
@@ -97,10 +103,26 @@ def main():
         # If no limit specified for Internal, process all (set to None which means no limit)
         if args.limit_internal is None:
             args.limit_internal = None  # None means process all
-    
+
+    # If --internal-aircraft-only or --internal-sales-only, skip other sources and set internal mode
+    if args.internal_aircraft_only:
+        args.limit_controller = -1
+        args.limit_aircraftexchange = -1
+        args.limit_faa = -1
+        args.limit_internal = None if args.limit_internal is None else args.limit_internal
+        args.internal_load_mode = 'aircraft_only'
+    elif args.internal_sales_only:
+        args.limit_controller = -1
+        args.limit_aircraftexchange = -1
+        args.limit_faa = -1
+        args.limit_internal = None if args.limit_internal is None else args.limit_internal
+        args.internal_load_mode = 'sales_only'
+    else:
+        args.internal_load_mode = None
+
     # Auto-detect single source mode: if only one source has a limit specified,
     # automatically skip the others (unless --test flag or explicit --*-only flags are used)
-    if not args.test and not args.controller_only and not args.aircraftexchange_only and not args.faa_only and not args.internal_only:
+    if not args.test and not args.controller_only and not args.aircraftexchange_only and not args.faa_only and not args.internal_only and not args.internal_aircraft_only and not args.internal_sales_only:
         specified_limits = [
             (args.limit_controller is not None, 'controller'),
             (args.limit_aircraftexchange is not None, 'aircraftexchange'),
@@ -321,9 +343,21 @@ def main():
             'faa': args.limit_faa,
             'internal': args.limit_internal,
         }
+        faa_master_offset = getattr(args, 'faa_master_offset', None)
+        if faa_master_offset is not None and faa_master_offset > 0:
+            logger.info(f"FAA MASTER: will skip first {faa_master_offset} rows (--faa-master-offset {faa_master_offset})")
         if args.skip_controller_index:
             logger.info("SKIP CONTROLLER INDEX: will process only Controller detail (and other sources)")
-        summary = loader.load_all_latest(limits=limits, skip_controller_index=args.skip_controller_index)
+        if getattr(args, 'internal_load_mode', None) == 'aircraft_only':
+            logger.info("INTERNAL DB: loading aircraft only (--internal-aircraft-only)")
+        elif getattr(args, 'internal_load_mode', None) == 'sales_only':
+            logger.info("INTERNAL DB: loading sales only (--internal-sales-only)")
+        summary = loader.load_all_latest(
+            limits=limits,
+            skip_controller_index=args.skip_controller_index,
+            internal_load_mode=getattr(args, 'internal_load_mode', None),
+            faa_master_offset=faa_master_offset,
+        )
         
         # Print summary
         logger.info("=" * 60)

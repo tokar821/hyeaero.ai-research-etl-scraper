@@ -60,6 +60,8 @@ class DataLoader:
         self,
         limits: Optional[Dict[str, int]] = None,
         skip_controller_index: bool = False,
+        internal_load_mode: Optional[str] = None,
+        faa_master_offset: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Load latest date data from all sources.
 
@@ -70,6 +72,8 @@ class DataLoader:
                 - 'faa': Limit FAA records
                 - 'internal': Limit internal DB records
             skip_controller_index: If True, skip Controller index (listings); run only Controller detail.
+            internal_load_mode: If 'aircraft_only', load only aircraft.csv; if 'sales_only', load only recent_sales.csv.
+            faa_master_offset: If set, skip first N rows of FAA MASTER.txt (to continue from a given row).
 
         Returns:
             Dict with summary statistics
@@ -119,7 +123,9 @@ class DataLoader:
         if faa_limit != -1:  # -1 means skip, None means process all, number means limit
             faa_date = self.find_latest_date('faa')
             if faa_date:
-                stats = self.faa_loader.load_faa_data(faa_date, limit=faa_limit)
+                stats = self.faa_loader.load_faa_data(
+                    faa_date, limit=faa_limit, master_offset=faa_master_offset or 0
+                )
                 summary['faa'] = {'date': faa_date.isoformat(), **stats}
                 summary['total_inserted'] += stats.get('total_inserted', 0)
                 summary['total_updated'] += stats.get('total_updated', 0)
@@ -130,7 +136,13 @@ class DataLoader:
         # Load Internal DB (skip if limit is -1, process if None or number)
         internal_limit = limits.get('internal')
         if internal_limit != -1:
-            stats = self.internal_loader.load_internal_db_data(limit=internal_limit)
+            aircraft_only = internal_load_mode == 'aircraft_only'
+            sales_only = internal_load_mode == 'sales_only'
+            stats = self.internal_loader.load_internal_db_data(
+                limit=internal_limit,
+                aircraft_only=aircraft_only,
+                sales_only=sales_only,
+            )
             summary['internaldb'] = stats
             summary['total_inserted'] += stats.get('inserted', 0)
             summary['total_updated'] += stats.get('updated', 0)

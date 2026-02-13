@@ -28,7 +28,12 @@ except ImportError:
 class FAALoader(BaseLoader):
     """Loader for FAA Aircraft Registration Database data."""
 
-    def load_faa_data(self, ingestion_date: date, limit: Optional[int] = None) -> Dict[str, int]:
+    def load_faa_data(
+        self,
+        ingestion_date: date,
+        limit: Optional[int] = None,
+        master_offset: int = 0,
+    ) -> Dict[str, int]:
         """Load FAA Aircraft Registration Database data for a specific date.
         
         Loads ALL FAA files:
@@ -44,6 +49,7 @@ class FAALoader(BaseLoader):
         Args:
             ingestion_date: Date to load
             limit: Optional limit on number of records to process
+            master_offset: Skip first N rows of MASTER.txt (0 = process from start; use to continue after partial save)
 
         Returns:
             Dict with counts for all files
@@ -161,18 +167,22 @@ class FAALoader(BaseLoader):
                 with open(master_file, 'r', encoding='utf-8', errors='ignore') as f:
                     reader = csv.DictReader(f)
                     # Count total rows first for progress tracking
-                    rows = list(reader)
-                    total_rows = len(rows)
-                    logger.info(f"Found {total_rows} rows in MASTER.txt (processing up to {limit if limit else 'all'})")
+                    all_rows = list(reader)
+                    total_rows = len(all_rows)
+                    # Skip first master_offset rows (to continue from a previous partial run)
+                    rows = all_rows[master_offset:] if master_offset > 0 else all_rows
+                    if master_offset > 0:
+                        logger.info(f"FAA MASTER: skipping first {master_offset} rows (already saved); processing from row {master_offset + 1} to {total_rows}")
+                    logger.info(f"Found {total_rows} rows in MASTER.txt (processing {len(rows)} rows, up to {limit if limit else 'all'})")
                     
-                    total_to_process = min(limit, total_rows) if limit else total_rows
+                    total_to_process = min(limit, len(rows)) if limit else len(rows)
                     for i, row in enumerate(rows):
                         if limit and i >= limit:
                             logger.info(f"Reached FAA MASTER limit ({limit}), stopping")
                             break
-                        
+                        row_num = master_offset + i + 1  # 1-based display
                         # Log progress for every record
-                        logger.info(f"Processing FAA MASTER row {i + 1}/{total_to_process}: N-Number={row.get('N-NUMBER', 'N/A')}")
+                        logger.info(f"Processing FAA MASTER row {row_num}/{total_rows}: N-Number={row.get('N-NUMBER', 'N/A')}")
                         
                         # Decode manufacturer/model using ACFTREF lookup
                         mfr_mdl_code = row.get('MFR MDL CODE', row.get('mfr mdl code', row.get('mfr_mdl_code', ''))).strip()
@@ -188,15 +198,15 @@ class FAALoader(BaseLoader):
                         if result == 'inserted':
                             stats['master']['inserted'] += 1
                             stats['total_inserted'] += 1
-                            logger.info(f"[OK] [{i + 1}/{total_to_process}] Inserted FAA MASTER: N-Number={row.get('N-NUMBER')}, Serial={row.get('SERIAL-NUMBER')}")
+                            logger.info(f"[OK] [{row_num}/{total_rows}] Inserted FAA MASTER: N-Number={row.get('N-NUMBER')}, Serial={row.get('SERIAL-NUMBER')}")
                         elif result == 'updated':
                             stats['master']['updated'] += 1
                             stats['total_updated'] += 1
-                            logger.info(f"[OK] [{i + 1}/{total_to_process}] Updated FAA MASTER: N-Number={row.get('N-NUMBER')}")
+                            logger.info(f"[OK] [{row_num}/{total_rows}] Updated FAA MASTER: N-Number={row.get('N-NUMBER')}")
                         else:
                             stats['master']['skipped'] += 1
                             stats['total_skipped'] += 1
-                            logger.info(f"[SKIP] [{i + 1}/{total_to_process}] Skipped FAA MASTER: N-Number={row.get('N-NUMBER')}")
+                            logger.info(f"[SKIP] [{row_num}/{total_rows}] Skipped FAA MASTER: N-Number={row.get('N-NUMBER')}")
                         stats['master']['records'] += 1
                     
                     logger.info(f"FAA MASTER processing complete: {stats['master']['inserted']} inserted, {stats['master']['updated']} updated, {stats['master']['skipped']} skipped")
