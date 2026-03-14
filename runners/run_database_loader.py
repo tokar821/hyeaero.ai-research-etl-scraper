@@ -44,6 +44,10 @@ def main():
                        help='Process only FAA data (skip Controller, AircraftExchange, Internal DB)')
     parser.add_argument('--internal-only', action='store_true',
                        help='Process only Internal DB data (skip Controller, AircraftExchange, FAA)')
+    parser.add_argument('--aviacost-only', action='store_true',
+                       help='Process only Aviacost data (skip Controller, AircraftExchange, FAA, Internal)')
+    parser.add_argument('--limit-aviacost', type=int, default=None,
+                       help='Limit number of Aviacost records to process (for testing)')
     parser.add_argument('--internal-aircraft-only', action='store_true',
                        help='Process only Internal DB aircraft.csv (skip recent_sales and other sources)')
     parser.add_argument('--internal-sales-only', action='store_true',
@@ -73,6 +77,7 @@ def main():
         args.limit_aircraftexchange = -1  # Use -1 as sentinel to skip
         args.limit_faa = -1
         args.limit_internal = -1
+        args.limit_aviacost = -1
         # If no limit specified for Controller, process all (set to None which means no limit)
         if args.limit_controller is None:
             args.limit_controller = None  # None means process all
@@ -82,6 +87,7 @@ def main():
         args.limit_controller = -1
         args.limit_faa = -1
         args.limit_internal = -1
+        args.limit_aviacost = -1
         # If no limit specified for AircraftExchange, process all (set to None which means no limit)
         if args.limit_aircraftexchange is None:
             args.limit_aircraftexchange = None  # None means process all
@@ -91,6 +97,7 @@ def main():
         args.limit_controller = -1  # Use -1 as sentinel to skip
         args.limit_aircraftexchange = -1
         args.limit_internal = -1
+        args.limit_aviacost = -1
         # If no limit specified for FAA, process all (set to None which means no limit)
         if args.limit_faa is None:
             args.limit_faa = None  # None means process all
@@ -100,21 +107,33 @@ def main():
         args.limit_controller = -1  # Use -1 as sentinel to skip
         args.limit_aircraftexchange = -1
         args.limit_faa = -1
+        args.limit_aviacost = -1
         # If no limit specified for Internal, process all (set to None which means no limit)
         if args.limit_internal is None:
             args.limit_internal = None  # None means process all
+
+    # If --aviacost-only flag, skip other sources
+    if args.aviacost_only:
+        args.limit_controller = -1
+        args.limit_aircraftexchange = -1
+        args.limit_faa = -1
+        args.limit_internal = -1
+        if args.limit_aviacost is None:
+            args.limit_aviacost = None
 
     # If --internal-aircraft-only or --internal-sales-only, skip other sources and set internal mode
     if args.internal_aircraft_only:
         args.limit_controller = -1
         args.limit_aircraftexchange = -1
         args.limit_faa = -1
+        args.limit_aviacost = -1
         args.limit_internal = None if args.limit_internal is None else args.limit_internal
         args.internal_load_mode = 'aircraft_only'
     elif args.internal_sales_only:
         args.limit_controller = -1
         args.limit_aircraftexchange = -1
         args.limit_faa = -1
+        args.limit_aviacost = -1
         args.limit_internal = None if args.limit_internal is None else args.limit_internal
         args.internal_load_mode = 'sales_only'
     else:
@@ -122,12 +141,13 @@ def main():
 
     # Auto-detect single source mode: if only one source has a limit specified,
     # automatically skip the others (unless --test flag or explicit --*-only flags are used)
-    if not args.test and not args.controller_only and not args.aircraftexchange_only and not args.faa_only and not args.internal_only and not args.internal_aircraft_only and not args.internal_sales_only:
+    if not args.test and not args.controller_only and not args.aircraftexchange_only and not args.faa_only and not args.internal_only and not args.aviacost_only and not args.internal_aircraft_only and not args.internal_sales_only:
         specified_limits = [
             (args.limit_controller is not None, 'controller'),
             (args.limit_aircraftexchange is not None, 'aircraftexchange'),
             (args.limit_faa is not None, 'faa'),
             (args.limit_internal is not None, 'internal'),
+            (args.limit_aviacost is not None, 'aviacost'),
         ]
         specified_count = sum(1 for has_limit, _ in specified_limits if has_limit)
         
@@ -141,18 +161,27 @@ def main():
                         args.limit_aircraftexchange = -1
                         args.limit_faa = -1
                         args.limit_internal = -1
+                        args.limit_aviacost = -1
                     elif source_name == 'aircraftexchange':
                         args.limit_controller = -1
                         args.limit_faa = -1
                         args.limit_internal = -1
+                        args.limit_aviacost = -1
                     elif source_name == 'faa':
                         args.limit_controller = -1
                         args.limit_aircraftexchange = -1
                         args.limit_internal = -1
+                        args.limit_aviacost = -1
                     elif source_name == 'internal':
                         args.limit_controller = -1
                         args.limit_aircraftexchange = -1
                         args.limit_faa = -1
+                        args.limit_aviacost = -1
+                    elif source_name == 'aviacost':
+                        args.limit_controller = -1
+                        args.limit_aircraftexchange = -1
+                        args.limit_faa = -1
+                        args.limit_internal = -1
                     break
     
     try:
@@ -161,7 +190,8 @@ def main():
         if args.test or any([args.limit_controller and args.limit_controller != -1, 
                              args.limit_aircraftexchange and args.limit_aircraftexchange != -1,
                              args.limit_faa and args.limit_faa != -1, 
-                             args.limit_internal and args.limit_internal != -1]):
+                             args.limit_internal and args.limit_internal != -1,
+                             args.limit_aviacost and args.limit_aviacost != -1]):
             logger.info("TEST MODE - Processing limited data")
             if args.limit_controller and args.limit_controller != -1:
                 logger.info(f"  Controller limit: {args.limit_controller}")
@@ -171,6 +201,8 @@ def main():
                 logger.info(f"  FAA limit: {args.limit_faa}")
             if args.limit_internal and args.limit_internal != -1:
                 logger.info(f"  Internal DB limit: {args.limit_internal}")
+            if getattr(args, 'limit_aviacost', None) and args.limit_aviacost != -1:
+                logger.info(f"  Aviacost limit: {args.limit_aviacost}")
         
         # Log which sources are being skipped
         if args.controller_only:
@@ -181,8 +213,10 @@ def main():
             logger.info("FAA-ONLY MODE: Processing only FAA data")
         elif args.internal_only:
             logger.info("INTERNAL-ONLY MODE: Processing only Internal DB data")
+        elif args.aviacost_only:
+            logger.info("AVIACOST-ONLY MODE: Processing only Aviacost data")
         elif any([args.limit_controller == -1, args.limit_aircraftexchange == -1, 
-                  args.limit_faa == -1, args.limit_internal == -1]):
+                  args.limit_faa == -1, args.limit_internal == -1, getattr(args, 'limit_aviacost', None) == -1]):
             skipped = []
             if args.limit_controller == -1:
                 skipped.append("Controller")
@@ -192,6 +226,8 @@ def main():
                 skipped.append("FAA")
             if args.limit_internal == -1:
                 skipped.append("Internal DB")
+            if getattr(args, 'limit_aviacost', None) == -1:
+                skipped.append("Aviacost")
             if skipped:
                 logger.info(f"Skipping sources: {', '.join(skipped)}")
         logger.info("=" * 60)
@@ -331,6 +367,17 @@ def main():
             except Exception as e:
                 logger.warning(f"Could not check/increase registration_number column size: {e}")
         
+        # Ensure aviacost_aircraft_details exists when loading Aviacost (table was added after initial schema)
+        aviacost_limit = getattr(args, 'limit_aviacost', None)
+        if aviacost_limit != -1:
+            if not db_client.table_exists('aviacost_aircraft_details'):
+                migration_sql = Path(__file__).parent.parent / "database" / "migrations" / "ensure_aviacost_aircraft_details.sql"
+                if migration_sql.exists():
+                    logger.info("Creating aviacost_aircraft_details table (migration)...")
+                    db_client.create_schema(schema_file=migration_sql)
+                else:
+                    logger.warning("Aviacost migration file not found: %s", migration_sql)
+
         # Initialize data loader
         loader = DataLoader(db_client)
         
@@ -342,6 +389,7 @@ def main():
             'aircraftexchange': args.limit_aircraftexchange,
             'faa': args.limit_faa,
             'internal': args.limit_internal,
+            'aviacost': getattr(args, 'limit_aviacost', None),
         }
         faa_master_offset = getattr(args, 'faa_master_offset', None)
         if faa_master_offset is not None and faa_master_offset > 0:
@@ -383,6 +431,7 @@ def main():
             logger.info(f"  - RESERVED: {faa_stats.get('reserved', {})}")
             logger.info(f"  - PDFs: {faa_stats.get('pdfs', {})}")
         logger.info(f"Internal DB: {summary.get('internaldb')}")
+        logger.info(f"Aviacost: {summary.get('aviacost')}")
         logger.info(f"Total Inserted: {summary['total_inserted']}")
         logger.info(f"Total Updated: {summary['total_updated']}")
         logger.info(f"Total Skipped: {summary['total_skipped']}")

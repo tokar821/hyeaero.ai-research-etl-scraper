@@ -17,6 +17,7 @@ from .loaders.controller_loader import ControllerLoader
 from .loaders.aircraftexchange_loader import AircraftExchangeLoader
 from .loaders.faa_loader import FAALoader
 from .loaders.internal_loader import InternalLoader
+from .loaders.aviacost_loader import AviacostLoader
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class DataLoader:
         self.aircraftexchange_loader = AircraftExchangeLoader(db_client, store_base_path)
         self.faa_loader = FAALoader(db_client, store_base_path)
         self.internal_loader = InternalLoader(db_client, store_base_path)
+        self.aviacost_loader = AviacostLoader(db_client, store_base_path)
         
         logger.info(f"DataLoader initialized with store base path: {store_base_path}")
 
@@ -85,6 +87,7 @@ class DataLoader:
             'aircraftexchange': None,
             'faa': None,
             'internaldb': None,
+            'aviacost': None,
             'total_inserted': 0,
             'total_updated': 0,
             'total_skipped': 0,
@@ -149,5 +152,20 @@ class DataLoader:
             summary['total_skipped'] += stats.get('skipped', 0)
         else:
             logger.info("Skipping Internal DB data (limit set to -1)")
+
+        # Load Aviacost (skip if limit is -1)
+        aviacost_limit = limits.get("aviacost")
+        if aviacost_limit != -1:
+            aviacost_date = self.find_latest_date("aviacost")
+            if aviacost_date:
+                stats = self.aviacost_loader.load_aviacost_data(
+                    aviacost_date, limit=aviacost_limit if aviacost_limit else None
+                )
+                summary["aviacost"] = {"date": aviacost_date.isoformat(), **stats}
+                summary["total_inserted"] += stats.get("inserted", 0)
+                summary["total_updated"] += stats.get("updated", 0)
+                summary["total_skipped"] += stats.get("skipped", 0)
+        else:
+            logger.info("Skipping Aviacost data (limit set to -1)")
 
         return summary
