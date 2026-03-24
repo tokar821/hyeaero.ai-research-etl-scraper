@@ -194,6 +194,38 @@ The pipeline includes PostgreSQL database integration:
 - **Data Loader**: `database/data_loader.py` - Loads scraped data from `store/` into PostgreSQL
 - **Runner**: `runners/run_database_loader.py` - Command to load latest data
 
+### PhlyData — internal `aircraft.csv` → `phlydata_aircraft`
+
+Hye Aero’s **PhlyData** table (`public.phlydata_aircraft`) is loaded from the internal export:
+
+`store/raw/internaldb/aircraft.csv`
+
+That file includes identity **and** snapshot fields (status, ask/take/sold as text, hours, programs, brokers, countries, dates, features, etc.). The loader keeps Postgres columns in sync with `backend/rag/phlydata_aircraft_schema.py`.
+
+**Prerequisites:** `POSTGRES_CONNECTION_STRING` in `etl-pipeline/.env` or `backend/.env`.
+
+```bash
+cd etl-pipeline
+# venv recommended: python -m venv venv && venv\Scripts\activate  (Windows) or source venv/bin/activate
+pip install -r requirements.txt
+
+# Upsert all rows (adds missing columns on existing databases automatically)
+python scripts/build_phlydata_aircraft_table.py
+
+# Full reload: empty table then load (use after major CSV/schema changes)
+python scripts/build_phlydata_aircraft_table.py --reset
+
+# Preview row count only
+python scripts/build_phlydata_aircraft_table.py --dry-run
+```
+
+Windows (from repo root):
+
+```powershell
+.\etl-pipeline\scripts\run_phlydata_aircraft_load.ps1
+.\etl-pipeline\scripts\run_phlydata_aircraft_load.ps1 -Reset
+```
+
 ### Running Database Loader
 
 ```bash
@@ -208,6 +240,43 @@ The loader will:
 - Store raw data in append-only table
 
 See [DATABASE_LOADER.md](./docs/DATABASE_LOADER.md) for detailed documentation.
+
+### ZoomInfo contact API smoke test (optional)
+
+Uses the same client as the backend (`backend/services/zoominfo_client.py`). Set `ZOOMINFO_*` variables in `backend/.env` (or `etl-pipeline/.env`).
+
+```bash
+python scripts/test_zoominfo_contact_three_way.py --full-name "Jane Doe"
+python scripts/test_zoominfo_contact_three_way.py --full-name "Jane Doe" --json
+```
+
+Runs **three** checks: contact **search**, contact **enrich by personId**, contact **enrich by name only**.
+
+### Fix mistaken `faa_registrations.serial_number` (N-number copied into serial)
+
+If some rows used the **tail** as **serial** by mistake, reconcile from an official **MASTER** CSV:
+
+```bash
+python scripts/fix_faa_registrations_serial_from_master_csv.py --master-csv path/to/export.csv --ingestion-date YYYY-MM-DD
+python scripts/fix_faa_registrations_serial_from_master_csv.py --master-csv path/to/export.csv --ingestion-date YYYY-MM-DD --apply
+
+# Wrong n_number (tail) but serial is correct: rows where serial == n_number in DB → set n_number from MASTER by SERIAL NUMBER match
+python scripts/fix_faa_registrations_n_number_from_master_csv.py --master-csv path/to/export.csv --ingestion-date YYYY-MM-DD
+python scripts/fix_faa_registrations_n_number_from_master_csv.py --master-csv path/to/export.csv --ingestion-date YYYY-MM-DD --apply
+# Optional: treat 00174 and 174 as same serial for lookup: add --allow-leading-zero-alias
+```
+
+Optional `--fix-when-csv-differs` updates any row whose N-number is in MASTER and CSV serial ≠ DB serial (use with care).
+
+### Tavily FAA owner hint (optional)
+
+Requires `TAVILY_API_KEY` in `backend/.env`. Uses built-in sample registrant + address rows (no database):
+
+```bash
+python scripts/test_tavily_owner_hint.py --sample other
+python scripts/test_tavily_owner_hint.py --sample kb
+python scripts/test_tavily_owner_hint.py --json-out
+```
 
 ## Next Steps
 
